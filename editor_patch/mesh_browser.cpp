@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -36,9 +37,19 @@ constexpr float preview_pitch_limit = 89.0f;
 constexpr float pi = 3.14159265f;
 // Packfile directory records store the name in a fixed 60 byte field.
 constexpr std::size_t packfile_name_max = 60;
-// character_mesh_load_action (0x004C2150) appends to a 172 entry array on the character with no
-// bounds check and nothing ever removes an entry, so stop well short of it.
-constexpr std::size_t preview_max_actions = 96;
+// character_mesh_load_action (0x004C2150) appends to the character's action array with no bounds
+// check and nothing short of a re-init removes an entry, so new appends stop well short of its
+// (0x120C - 0xF5C) / 4 = 172 entries, leaving room for the editor's own state animation loads.
+constexpr int preview_max_actions = 96;
+static_assert(preview_max_actions < editor_character_max_actions);
+// The skeleton a name resolves to is claimed out of a table nothing releases while the editor runs,
+// and 0x004FFF90 writes through a null slot pointer once every entry is taken, so a load that would
+// claim one stops short of the end.
+constexpr unsigned preview_max_anim_skeletons = 790;
+static_assert(preview_max_anim_skeletons < editor_max_anim_skeletons);
+// 0x004FFF90 copies both the name it is given and each name already in the table into 60 byte stack
+// buffers that sit directly below its return address.
+constexpr std::size_t anim_name_max = 59;
 // An .rfa stores no bone names, only a per bone table indexed by the character's own bone index.
 // 0x005002DB reads that table without a bounds check, so an animation with fewer bones than the
 // character walks off it into keyframe data and dereferences the result. The bone count is both
@@ -46,7 +57,9 @@ constexpr std::size_t preview_max_actions = 96;
 constexpr std::uint32_t rfa_signature = 0x46564D56; // "VMVF"
 constexpr int rfa_max_bones = 50;
 constexpr std::size_t rfa_header_size = 0x50;
-constexpr std::size_t rfa_read_all = static_cast<std::size_t>(-1);
+// Ceiling on how much of an animation is read for validation. The largest stock .rfa is under
+// 600 KB; the cap is here so a file that claims to be enormous cannot ask for the allocation.
+constexpr std::size_t rfa_read_max = 16u * 1024 * 1024;
 
 struct BrowserSource
 {
@@ -72,9 +85,11 @@ enum PreviewBackground
 // Kept across openings for the session only, as the dialog holds no settings of its own.
 PreviewBackground g_preview_background = preview_bg_editor;
 
-// Actions live on the character behind a mesh file, which outlives any one vmesh, so the indices
-// are cached for the whole editor session under the mesh file name.
-std::map<std::string, std::map<std::string, int>> g_action_cache;
+// Animations already proven playable on a mesh file, so a second look at one does not re-read it.
+// Action indices are deliberately not cached: character_mesh_load_action returns the index of an
+// action the character already carries and appends only otherwise, so the engine is the one safe
+// source for one, where a cached index outlives the character a level unload frees.
+std::map<std::string, std::set<std::string>> g_validated_actions;
 
 // Bone count per animation file, 0 when unreadable. Session wide: the files do not change.
 std::map<std::string, int> g_anim_bone_cache;
@@ -102,7 +117,6 @@ struct BrowserState
 
     EditorVMesh* vmesh;
     void* owned_character;      // base character slot this preview brought in, if any
-    std::string owned_character_key;
     bool load_failed;
     int anim_index;
     Vector3 bound_center;
@@ -125,7 +139,18 @@ const Matrix3 identity_orient{{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0
 const Vector3 preview_origin{0.0f, 0.0f, 0.0f};
 const Color preview_ambient{180, 180, 180, 255};
 
-WNDPROC g_preview_orig_wndproc = nullptr;
+// The subclassed preview keeps its own original proc in its window data rather than in a global.
+WNDPROC preview_orig_wndproc(HWND ctl)
+{
+    return reinterpret_cast<WNDPROC>(GetWindowLongPtrA(ctl, GWLP_USERDATA));
+}
+
+LRESULT preview_default(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    WNDPROC orig = preview_orig_wndproc(hwnd);
+    return orig ? CallWindowProcA(orig, hwnd, msg, wparam, lparam)
+                : DefWindowProcA(hwnd, msg, wparam, lparam);
+}
 
 BrowserState* get_state(HWND hdlg)
 {
@@ -177,13 +202,17 @@ bool is_v3c(const std::string& name)
     return !name.empty() && string_iequals(get_ext_from_filename(name), "v3c");
 }
 
-// The animation loader (0x00500D30) strips whatever extension it is handed and appends ".rfa",
-// matching the .mvf to .rfa rewrite the table importer already does.
+// The animation loader (0x00500D30) cuts the name at its FIRST dot (strchr) and appends ".rfa", so
+// the name validated here has to be built the same way or a multi dot name validates one file and
+// loads another.
 std::string anim_load_name(const std::string& name)
 {
-    std::string out = name;
-    replace_ext_if(out, "mvf", "rfa");
-    return out;
+    return name.substr(0, name.find('.')) + ".rfa";
+}
+
+bool anim_name_fits(const std::string& name)
+{
+    return name.size() <= anim_name_max && anim_load_name(name).size() <= anim_name_max;
 }
 
 template<typename T>
@@ -251,46 +280,59 @@ int anim_bone_count(const std::string& anim_name)
 
 struct CharacterLimits
 {
-    int bones;          // 0 when the vmesh is not a loaded character
+    bool character;     // the vmesh is a loaded .v3c
+    int bones;          // 0 when the character's own bone count is outside what the engine poses
     int morph_capacity; // exclusive upper bound on an animation's morph vertex indices
 };
 
-// Morph indices out of an .rfa are applied by 0x00500720 as `chunk->orig_map[index]` when the LOD
-// carries a map, and straight into the per chunk vertex scratch buffer at 0x017202E0 when it does
-// not. Neither step is bounds checked, so the bound is the map's length (the LOD vertex count) or,
-// with no map, the smallest chunk's vertex count.
+// The capacity LOD0 offers: morph indices are applied by 0x00500720 as `chunk->orig_map[index]`
+// when the LOD carries a map, and straight into the per chunk vertex scratch buffer at 0x017202E0
+// when it does not. 0 means indeterminable.
+int lod_morph_capacity(const EditorVifMesh* mesh)
+{
+    if (mesh->flags & VIF_LOD_MORPH_VERTICES_MAP) {
+        return std::max(mesh->num_original_vecs, 0);
+    }
+    if (mesh->chunks && mesh->num_chunks > 0) {
+        int smallest = mesh->chunks[0].num_vecs;
+        for (unsigned i = 1; i < mesh->num_chunks; ++i) {
+            smallest = std::min<int>(smallest, mesh->chunks[i].num_vecs);
+        }
+        return smallest;
+    }
+    return 0;
+}
+
+// Morph apply only ever runs on LOD0: 0x00506830 skips its whole morph block when the rendered LOD
+// index (arg 6) is non-zero, so 0x00507C90 always hands 0x00500720 LOD0's orig_map and
+// num_original_vecs. RF.exe carries the same gate byte for byte at 0x0052EBEB.
 CharacterLimits character_limits(EditorVMesh* vmesh)
 {
     CharacterLimits limits{};
     if (!vmesh || vmesh_get_type(vmesh) != VMESH_TYPE_CHARACTER || !vmesh->mesh) {
         return limits;
     }
+    limits.character = true;
     const auto* character = static_cast<const EditorCharacter*>(vmesh->mesh);
     const int bones = character->num_bones;
     limits.bones = (bones >= 1 && bones <= rfa_max_bones) ? bones : 0;
 
-    if (character->num_character_meshes <= 0) {
-        return limits;
-    }
-    const EditorV3dMesh* v3d_mesh = character->character_meshes[0].mesh;
-    const EditorVifLodMesh* lod_mesh = v3d_mesh ? v3d_mesh->lod_mesh : nullptr;
-    if (!lod_mesh || lod_mesh->num_levels <= 0) {
-        return limits;
-    }
-    const EditorVifMesh* mesh = lod_mesh->meshes[0];
-    if (!mesh) {
-        return limits;
-    }
-    if (mesh->flags & VIF_LOD_MORPH_VERTICES_MAP) {
-        limits.morph_capacity = std::max(mesh->num_original_vecs, 0);
-    }
-    else if (mesh->chunks && mesh->num_chunks > 0) {
-        int smallest = mesh->chunks[0].num_vecs;
-        for (unsigned i = 1; i < mesh->num_chunks; ++i) {
-            smallest = std::min<int>(smallest, mesh->chunks[i].num_vecs);
+    const int mesh_count =
+        std::clamp<int>(character->num_character_meshes, 0,
+                        static_cast<int>(std::size(character->character_meshes)));
+    bool any_mesh = false;
+    int capacity = 0;
+    for (int m = 0; m < mesh_count; ++m) {
+        const EditorV3dMesh* v3d_mesh = character->character_meshes[m].mesh;
+        const EditorVifLodMesh* lod_mesh = v3d_mesh ? v3d_mesh->lod_mesh : nullptr;
+        if (!lod_mesh || lod_mesh->num_levels < 1 || !lod_mesh->meshes[0]) {
+            continue;
         }
-        limits.morph_capacity = smallest;
+        const int mesh_capacity = lod_morph_capacity(lod_mesh->meshes[0]);
+        capacity = any_mesh ? std::min(capacity, mesh_capacity) : mesh_capacity;
+        any_mesh = true;
     }
+    limits.morph_capacity = any_mesh ? capacity : 0;
     return limits;
 }
 
@@ -298,8 +340,14 @@ CharacterLimits character_limits(EditorVMesh* vmesh)
 // playback path reads has to be proven in range before the file is handed to the loader.
 bool rfa_is_playable(const std::string& file, const CharacterLimits& limits)
 {
+    // The pose path indexes an animation's per bone table with the character's own bone index and
+    // its capacity is exactly 50, which 0x004C1F90 does not check the loaded count against, so a
+    // character whose count falls outside that range can be given no animation at all.
+    if (limits.character && limits.bones <= 0) {
+        return false;
+    }
     std::vector<std::uint8_t> buf;
-    if (!read_anim_file(file, rfa_read_all, buf) || buf.size() < rfa_header_size) {
+    if (!read_anim_file(file, rfa_read_max, buf) || buf.size() < rfa_header_size) {
         return false;
     }
     const std::uint8_t* data = buf.data();
@@ -720,30 +768,90 @@ void preview_free(BrowserState& st)
         st.vmesh = nullptr;
     }
     if (st.owned_character) {
-        // Cached action indices are positions in this character's own array
-        g_action_cache.erase(st.owned_character_key);
         character_free(st.owned_character);
         st.owned_character = nullptr;
-        st.owned_character_key.clear();
     }
     st.anim_index = -1;
 }
 
-// A .v3c's base character stays in a table of 64 slots that stock RED never frees a slot in, so
-// browsing characters ends in the fatal "No more base character room" at the 64th distinct one.
-// Take ownership of the slot this load brings in and release it on the next swap; one that was
-// already resident belongs to whatever loaded it. The slot count, not the name, decides that, so
-// it does not depend on how the loader spells the name.
+// A .v3c's base character stays in a table of 64 slots that nothing frees before the editor's own
+// atexit handler runs, so browsing characters ends in the fatal "No more base character room" at
+// the 64th distinct one. Take ownership of the slot this load brings in and release it on the next
+// swap; one that was already resident belongs to whatever loaded it. Which slots appeared, not the
+// name, decides that, so it does not depend on how the loader spells the name, and the dialog is
+// modal so nothing else can have claimed one in between.
 EditorVMesh* preview_load_vmesh(BrowserState& st, const std::string& name)
 {
-    const unsigned characters_before = editor_base_characters_in_use();
+    const std::uint64_t before = editor_base_characters_in_use();
     EditorVMesh* vmesh = mesh_load_vmesh_file(name.c_str());
-    if (vmesh && vmesh->mesh && vmesh_get_type(vmesh) == VMESH_TYPE_CHARACTER &&
-        editor_base_characters_in_use() > characters_before) {
+    const std::uint64_t claimed = editor_base_characters_in_use() & ~before;
+    if (!claimed) {
+        return vmesh;
+    }
+    if (vmesh && vmesh->mesh && vmesh_get_type(vmesh) == VMESH_TYPE_CHARACTER) {
         st.owned_character = vmesh->mesh;
-        st.owned_character_key = string_to_lower(name);
+        return vmesh;
+    }
+    // The load claimed a slot and then failed, so nothing is left holding it.
+    for (unsigned i = 0; i < editor_max_base_characters; ++i) {
+        if (claimed & (1ull << i)) {
+            character_free(&editor_base_characters[i]);
+        }
     }
     return vmesh;
+}
+
+// character_mesh_load_action keys its dedup on the skeleton a name resolves to, so an action the
+// character already carries is recognised the way the engine recognises it: through the same name
+// keyed table 0x004FFF90 searches, with the extension stripped from both sides.
+const void* find_anim_skeleton(const std::string& file)
+{
+    const auto stem = [](const char* text, std::size_t len) {
+        for (std::size_t i = len; i > 0; --i) {
+            if (text[i - 1] == '.') {
+                return i - 1;
+            }
+        }
+        return len;
+    };
+    const std::size_t key_len = stem(file.c_str(), file.size());
+    for (const EditorAnimSkeleton& skeleton : editor_anim_skeletons) {
+        const std::size_t name_len = strnlen(skeleton.name, sizeof(skeleton.name));
+        if (name_len == 0) {
+            continue;
+        }
+        const std::size_t len = stem(skeleton.name, name_len);
+        if (len == key_len && _strnicmp(skeleton.name, file.c_str(), len) == 0) {
+            return &skeleton;
+        }
+    }
+    return nullptr;
+}
+
+unsigned anim_skeletons_in_use()
+{
+    unsigned used = 0;
+    for (const EditorAnimSkeleton& skeleton : editor_anim_skeletons) {
+        if (skeleton.name[0] != '\0') {
+            ++used;
+        }
+    }
+    return used;
+}
+
+bool character_carries_action(const EditorCharacter* character, const void* skeleton,
+                              std::uint8_t is_state)
+{
+    if (!skeleton) {
+        return false;
+    }
+    const int count = std::clamp(character->num_actions, 0, editor_character_max_actions);
+    for (int i = 0; i < count; ++i) {
+        if (character->actions[i] == skeleton && character->action_is_state[i] == is_state) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int preview_load_action(BrowserState& st, const std::string& anim_name)
@@ -752,25 +860,31 @@ int preview_load_action(BrowserState& st, const std::string& anim_name)
         !st.vmesh->instance) {
         return -1;
     }
-    const std::string file = anim_load_name(anim_name);
-    const std::string file_key = string_to_lower(file);
-    auto& actions = g_action_cache[string_to_lower(st.selected)];
-    const auto it = actions.find(file_key);
-    if (it != actions.end()) {
-        return it->second;
-    }
-    if (actions.size() >= preview_max_actions) {
+    if (!anim_name_fits(anim_name)) {
         return -1;
     }
-    if (!rfa_is_playable(file, character_limits(st.vmesh))) {
+    const std::string file = anim_load_name(anim_name);
+    auto& validated = g_validated_actions[string_to_lower(st.selected)];
+    const std::string file_key = string_to_lower(file);
+    if (validated.find(file_key) == validated.end()) {
+        if (!rfa_is_playable(file, character_limits(st.vmesh))) {
+            return -1;
+        }
+        validated.insert(file_key);
+    }
+    // An action the character already carries appends nothing and claims no skeleton, so both
+    // ceilings bind only on a load that would grow something.
+    const auto* character = static_cast<const EditorCharacter*>(st.vmesh->mesh);
+    const void* skeleton = find_anim_skeleton(file);
+    if (!skeleton && anim_skeletons_in_use() >= preview_max_anim_skeletons) {
+        return -1;
+    }
+    if (character->num_actions >= preview_max_actions &&
+        !character_carries_action(character, skeleton, 0)) {
         return -1;
     }
     const int index = character_mesh_load_action(st.vmesh->mesh, file.c_str(), 0, 0);
-    if (index < 0) {
-        return -1;
-    }
-    actions.emplace(file_key, index);
-    return index;
+    return (index >= 0) ? index : -1;
 }
 
 void preview_play_anim(HWND hdlg, BrowserState& st, const std::string& anim_name)
@@ -900,11 +1014,10 @@ Color preview_background_color()
     if (g_preview_background == preview_bg_black) {
         return {0x00, 0x00, 0x00, 0xff};
     }
-    // Same source the viewport painter uses: the first Preferences colour, a COLORREF whose low
-    // byte is red.
-    if (const auto* prefs = static_cast<const uint8_t*>(editor_color_prefs())) {
-        const uint8_t* rgb = prefs + editor_prefs_background_color;
-        return {rgb[0], rgb[1], rgb[2], 0xff};
+    // Same source the viewport painter uses.
+    if (const EditorColorPrefs* prefs = editor_color_prefs()) {
+        const COLORREF color = prefs->background;
+        return {GetRValue(color), GetGValue(color), GetBValue(color), 0xff};
     }
     return {0x00, 0x00, 0x00, 0xff};
 }
@@ -921,8 +1034,7 @@ void preview_draw(HWND ctrl, BrowserState& st)
 
     const Color background = preview_background_color();
     // The viewport painter clears before it sets its own colour, so leave the global as found.
-    const Color saved{gr_current_color[0], gr_current_color[1], gr_current_color[2],
-                      gr_current_color[3]};
+    const auto saved_color = static_cast<unsigned>(red::gr_screen.current_color);
     // A level with a short far clip would otherwise cut the preview and squeeze its depth range.
     const float saved_far = gr_far_clip_dist;
     gr_set_far_clip(0.0f);
@@ -939,16 +1051,16 @@ void preview_draw(HWND ctrl, BrowserState& st)
     }
     gr_flip();
     gr_set_far_clip(saved_far);
-    set_draw_color(saved.r, saved.g, saved.b, saved.a);
+    set_draw_color(saved_color & 0xff, (saved_color >> 8) & 0xff, (saved_color >> 16) & 0xff,
+                   (saved_color >> 24) & 0xff);
 }
 
-LRESULT CALLBACK PreviewSurfaceProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+LRESULT preview_surface_message(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-    WNDPROC orig = g_preview_orig_wndproc;
     HWND hdlg = GetParent(hwnd);
     BrowserState* st = hdlg ? get_state(hdlg) : nullptr;
     if (!st) {
-        return CallWindowProcA(orig, hwnd, msg, wparam, lparam);
+        return preview_default(hwnd, msg, wparam, lparam);
     }
 
     switch (msg) {
@@ -962,6 +1074,10 @@ LRESULT CALLBACK PreviewSurfaceProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
         st->spinning = false;
         st->drag_pos = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         SetCapture(hwnd);
+        // A tree keeps WM_MOUSEWHEEL for its own scrolling, so the wheel only reaches the dialog
+        // while the focus is somewhere that passes it on. Hovering must not steal focus from the
+        // trees, hence only on a drag.
+        SetFocus(hwnd);
         return 0;
     case WM_MOUSEMOVE:
         if (st->dragging) {
@@ -987,12 +1103,25 @@ LRESULT CALLBACK PreviewSurfaceProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
         st->dragging = false;
         break;
     case WM_NCDESTROY:
-        SetWindowLongPtrA(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(orig));
+        if (WNDPROC orig = preview_orig_wndproc(hwnd)) {
+            SetWindowLongPtrA(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(orig));
+        }
         break;
     default:
         break;
     }
-    return CallWindowProcA(orig, hwnd, msg, wparam, lparam);
+    return preview_default(hwnd, msg, wparam, lparam);
+}
+
+LRESULT CALLBACK PreviewSurfaceProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    try {
+        return preview_surface_message(hwnd, msg, wparam, lparam);
+    }
+    catch (...) {
+        xlog::error("Mesh browser: preview surface message {:#x} failed", msg);
+        return 0;
+    }
 }
 
 void subclass_preview(HWND hdlg)
@@ -1004,7 +1133,7 @@ void subclass_preview(HWND hdlg)
     WNDPROC prev = reinterpret_cast<WNDPROC>(
         SetWindowLongPtrA(ctrl, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(PreviewSurfaceProc)));
     if (prev != PreviewSurfaceProc) {
-        g_preview_orig_wndproc = prev;
+        SetWindowLongPtrA(ctrl, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(prev));
     }
 }
 
@@ -1026,16 +1155,15 @@ void on_selection_changed(HWND hdlg, BrowserState& st)
 {
     HWND tree = GetDlgItem(hdlg, IDC_MESH_BROWSER_TREE);
     const int index = item_file_index(tree, TreeView_GetSelection(tree));
-    const std::string name = (index >= 0 && index < static_cast<int>(st.files.size()))
-                                 ? st.files[index].name
-                                 : std::string{};
+    const bool have_file = index >= 0 && index < static_cast<int>(st.files.size());
+    const std::string name = have_file ? st.files[index].name : std::string{};
     EnableWindow(GetDlgItem(hdlg, IDOK), !name.empty());
     if (name == st.selected) {
         return;
     }
     st.selected = name;
     std::string source;
-    if (index >= 0) {
+    if (have_file) {
         const BrowserSource& src = st.sources[st.files[index].source];
         source = src.path.empty() ? src.label : src.path;
     }
@@ -1074,7 +1202,7 @@ void capture_tree_rects(HWND hdlg, BrowserState& st)
     st.tree_full_bottom = anim_rc.bottom;
 }
 
-INT_PTR CALLBACK MeshBrowserDialogProc(HWND hdlg, UINT msg, WPARAM wparam, LPARAM lparam)
+INT_PTR mesh_browser_message(HWND hdlg, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     BrowserState* st = get_state(hdlg);
 
@@ -1082,13 +1210,24 @@ INT_PTR CALLBACK MeshBrowserDialogProc(HWND hdlg, UINT msg, WPARAM wparam, LPARA
     case WM_INITDIALOG: {
         SetWindowLongPtrA(hdlg, GWLP_USERDATA, lparam);
         auto& state = *reinterpret_cast<BrowserState*>(lparam);
+        alpine_center_dialog_on_owner(hdlg);
         subclass_preview(hdlg);
         capture_tree_rects(hdlg, state);
         SendDlgItemMessage(hdlg, IDC_MESH_BROWSER_FILTER, EM_SETLIMITTEXT, 64, 0);
         CheckRadioButton(hdlg, IDC_MESH_BROWSER_BG_EDITOR, IDC_MESH_BROWSER_BG_BLACK,
                          IDC_MESH_BROWSER_BG_EDITOR + g_preview_background);
-        collect_entries(state);
-        build_anim_mask(state);
+        bool listing_failed = false;
+        try {
+            collect_entries(state);
+            build_anim_mask(state);
+        }
+        catch (...) {
+            state.sources.clear();
+            state.files.clear();
+            state.anims.clear();
+            state.anim_mask.clear();
+            listing_failed = true;
+        }
         // The template is laid out with the animation pane in place, so this is its start state.
         state.anim_pane_shown = true;
         rebuild_mesh_tree(hdlg, state, state.initial);
@@ -1096,6 +1235,10 @@ INT_PTR CALLBACK MeshBrowserDialogProc(HWND hdlg, UINT msg, WPARAM wparam, LPARA
         on_anim_selection_changed(hdlg, state);
         on_selection_changed(hdlg, state);
         update_anim_pane(hdlg, state);
+        if (listing_failed) {
+            xlog::error("Mesh browser: out of memory listing the file system");
+            SetDlgItemTextA(hdlg, IDC_MESH_BROWSER_STATUS, "Out of memory listing meshes");
+        }
         SetTimer(hdlg, preview_timer_id, preview_timer_ms, nullptr);
         SetFocus(GetDlgItem(hdlg, IDC_MESH_BROWSER_TREE));
         return FALSE;
@@ -1227,6 +1370,18 @@ INT_PTR CALLBACK MeshBrowserDialogProc(HWND hdlg, UINT msg, WPARAM wparam, LPARA
     return FALSE;
 }
 
+// Nothing the dialog allocates may unwind into USER32's frames, so it is all contained here.
+INT_PTR CALLBACK MeshBrowserDialogProc(HWND hdlg, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    try {
+        return mesh_browser_message(hdlg, msg, wparam, lparam);
+    }
+    catch (...) {
+        xlog::error("Mesh browser: out of memory handling message {:#x}", msg);
+        return FALSE;
+    }
+}
+
 } // namespace
 
 bool alpine_anim_playable_on(EditorVMesh* vmesh, const char* anim_name)
@@ -1234,10 +1389,21 @@ bool alpine_anim_playable_on(EditorVMesh* vmesh, const char* anim_name)
     if (!vmesh || !anim_name || anim_name[0] == '\0') {
         return false;
     }
-    return rfa_is_playable(anim_load_name(anim_name), character_limits(vmesh));
+    // Called from hooks that RED frames sit below, so the validator's own allocation stops here.
+    try {
+        return anim_name_fits(anim_name) &&
+               rfa_is_playable(anim_load_name(anim_name), character_limits(vmesh));
+    }
+    catch (...) {
+        xlog::error("Mesh browser: out of memory validating animation '{}'", anim_name);
+        return false;
+    }
 }
 
-bool alpine_browse_mesh(HWND parent, std::string& filename, unsigned kinds, std::string* anim)
+namespace
+{
+
+bool browse_mesh(HWND parent, std::string& filename, unsigned kinds, std::string* anim)
 {
     HINSTANCE instance = reinterpret_cast<HINSTANCE>(&__ImageBase);
     if (!FindResourceA(instance, MAKEINTRESOURCEA(IDD_ALPINE_MESH_BROWSER),
@@ -1271,4 +1437,18 @@ bool alpine_browse_mesh(HWND parent, std::string& filename, unsigned kinds, std:
         return true;
     }
     return false;
+}
+
+} // namespace
+
+bool alpine_browse_mesh(HWND parent, std::string& filename, unsigned kinds, std::string* anim)
+{
+    // The caller is a RED dialog handler, so the browser's own allocation stops here too.
+    try {
+        return browse_mesh(parent, filename, kinds, anim);
+    }
+    catch (...) {
+        xlog::error("Mesh browser: out of memory opening the browser");
+        return false;
+    }
 }

@@ -15,6 +15,13 @@
 
 HWND GetMainFrameHandle();
 
+// Draw every mesh at LOD0. 0x00507890 is RED's only LOD picker (the single caller of 0x004C5DC0)
+// and feeds both the v3m and the v3c submit, so two branch swaps cover everything: 0x00507907 skips
+// the ERF 0x1|0x8 lowest-LOD force and 0x00507915 skips the distance walk, leaving EBP at the 0 the
+// preceding XOR put there. 0x01abc058 looks like the same lever but also switches the key light to
+// a fixed world vector, so it is left alone.
+bool g_editor_force_lod0 = true;
+
 // After geometry rebuild, rooms allocated from recycled heap memory may have stale
 // non-NULL geo_cache pointers left over from the previous cycle. The D3D8 renderer
 // checks geo_cache != NULL to decide whether to use an existing cache or rebuild.
@@ -63,47 +70,6 @@ static void repoint_array_refs(std::initializer_list<uintptr_t> sites, uintptr_t
 
 namespace red
 {
-    struct GrScreen
-    {
-        int signature;
-        int max_width;
-        int max_height;
-        int mode;
-        int window_mode;
-        int field_14;
-        float aspect;
-        int field_1c;
-        int bits_per_pixel;
-        int bytes_ber_pixel;
-        int field_28;
-        int offset_x;
-        int offset_y;
-        int clip_width;
-        int clip_height;
-        int max_tex_width;
-        int max_tex_height;
-        int clip_left;
-        int clip_right;
-        int clip_top;
-        int clip_bottom;
-        int current_color;
-        int current_bitmap;
-        int current_bitmap2;
-        int fog_mode;
-        int fog_color;
-        float fog_near;
-        float fog_far;
-        float fog_far_scaled;
-        bool recolor_enabled;
-        float recolor_red;
-        float recolor_green;
-        float recolor_blue;
-        int field_84;
-        int field_88;
-        int zbuffer_mode;
-    };
-    static_assert(sizeof(GrScreen) == 0x90);
-
     struct Vector3;
     struct Matrix3;
 
@@ -115,7 +81,6 @@ namespace red
     auto& gr_d3d_num_indices = addr_as_ref<int>(0x01839314);
     auto& gr_d3d_vertex_buffer_data = addr_as_ref<u8*>(0x0183B908);
     auto& gr_d3d_index_buffer_data = addr_as_ref<u8*>(0x0183B90C);
-    auto& gr_screen = addr_as_ref<GrScreen>(0x014CF748);
 
 }
 
@@ -722,6 +687,11 @@ void ApplyGraphicsPatches()
     repoint_array_refs({0x00505f4f, 0x00505f63, 0x00505ffc, 0x00506444, 0x00506bd1, 0x00506cc3,
                         0x005074b1},
                        0x01ab6294, mesh_vert_rgb);
+
+    if (g_editor_force_lod0) {
+        write_mem<u8>(0x00507907, 0xEB);
+        write_mem<u8>(0x00507915, 0xEB);
+    }
 
     // Restore render state after D3D device Reset()
     gr_d3d_device_reset_state_recovery.install();

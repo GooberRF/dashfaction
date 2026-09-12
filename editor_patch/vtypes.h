@@ -308,20 +308,47 @@ struct EditorCharacterMesh
 };
 static_assert(sizeof(EditorCharacterMesh) == 0x94);
 
-// .v3c character; only the bone count and the mesh table at the tail are mirrored
+constexpr int editor_character_max_actions = (0x120C - 0xF5C) / 4;
+
+// .v3c character; the size is the base character table's own stride.
 struct EditorCharacter
 {
-    uint8_t pad_00[0x48];
+    uint8_t pad_00[0x44];
+    int flags;     // bit 0 marks a base character table slot in use
     int num_bones; // written from the BONE section by 0x004C1FC3
-    uint8_t pad_4C[0x19BC - 0x4C];
-    int num_character_meshes;
+    uint8_t pad_4C[0xF58 - 0x4C];
+    // character_mesh_load_action returns the index of an action already in this list and appends
+    // otherwise, up to (0x120C - 0xF5C) / 4 entries with no bounds check; only a re-init clears it.
+    int num_actions;
+    void* actions[editor_character_max_actions]; // the skeleton the action's name resolved to
+    uint8_t action_is_state[editor_character_max_actions];
+    uint8_t pad_12B8[0x19BC - 0x12B8];
+    int num_character_meshes; // 0x004C2960 loads at most one
     EditorCharacterMesh character_meshes[1];
+    int field_1A54;
 };
+static_assert(sizeof(EditorCharacter) == 0x1A58);
+static_assert(offsetof(EditorCharacter, flags) == 0x44);
 static_assert(offsetof(EditorCharacter, num_bones) == 0x48);
+static_assert(offsetof(EditorCharacter, num_actions) == 0xF58);
+static_assert(offsetof(EditorCharacter, actions) == 0xF5C);
+static_assert(offsetof(EditorCharacter, action_is_state) == 0x120C);
 static_assert(offsetof(EditorCharacter, num_character_meshes) == 0x19BC);
 static_assert(offsetof(EditorCharacter, character_meshes) == 0x19C0);
 
-// .v3c instance (0x1D5C bytes, allocated at 0x004BE41F); only the action hold state is mirrored.
+// Animation skeletons are pooled by name with the extension stripped; 0x004FFF90 matches case
+// insensitively and claims a free slot when nothing matches, so an empty name marks one free.
+struct EditorAnimSkeleton
+{
+    char name[0x40];
+    uint8_t pad_40[0x7C - 0x40];
+};
+static_assert(sizeof(EditorAnimSkeleton) == 0x7C);
+constexpr unsigned editor_max_anim_skeletons = 800;
+static auto& editor_anim_skeletons =
+    addr_as_ref<EditorAnimSkeleton[editor_max_anim_skeletons]>(0x01912278);
+
+// .v3c instance (0x1D5C bytes, allocated at 0x004BE46E); only the action hold state is mirrored.
 struct EditorCharacterInstance
 {
     uint8_t pad_0000[0x1D4C];
@@ -333,23 +360,28 @@ struct EditorCharacterInstance
 static_assert(sizeof(EditorCharacterInstance) == 0x1D5C);
 static_assert(offsetof(EditorCharacterInstance, action_held) == 0x1D4C);
 
-// Base characters live in a fixed table of 64 entries (0x014FFB10, stride 0x1A58) with bit 0 of
-// +0x44 marking a slot in use. character_load_or_create reuses an entry whose name matches and
-// otherwise takes a free one; with all 64 taken it raises the fatal "No more base character room"
-// error at 0x004C2D39, which ends the process. Nothing in stock RED ever releases a slot:
-// character_free is the allocator's counterpart and has no callers.
+// Base characters live in a fixed table of 64 entries. character_load_or_create reuses an entry
+// whose name matches and otherwise takes a free one; with all 64 taken it raises the fatal "No more
+// base character room" error at 0x004C2D39, which ends the process. Nothing releases a slot while
+// the editor runs: the bulk unload 0x004C2C40 does clear them, but it is an atexit handler
+// (registered at 0x0048268E), it skips entries with flags & 8, and character_free has no callers.
 constexpr unsigned editor_max_base_characters = 64;
+constexpr int editor_character_in_use = 0x1;
+static auto& editor_base_characters =
+    addr_as_ref<EditorCharacter[editor_max_base_characters]>(0x014FFB10);
 static auto& character_free = addr_as_ref<void __cdecl(void* character)>(0x004C2DD0);
 
-inline unsigned editor_base_characters_in_use()
+// One bit per occupied slot, so a load that claimed one is identified by comparing before with
+// after rather than by trusting the loader to report it.
+inline uint64_t editor_base_characters_in_use()
 {
-    unsigned count = 0;
+    uint64_t mask = 0;
     for (unsigned i = 0; i < editor_max_base_characters; ++i) {
-        if (addr_as_ref<int>(0x014FFB10 + i * 0x1A58 + 0x44) & 1) {
-            ++count;
+        if (editor_base_characters[i].flags & editor_character_in_use) {
+            mask |= 1ull << i;
         }
     }
-    return count;
+    return mask;
 }
 
 struct EditorRenderParams; // forward declaration for vmesh_render
@@ -408,20 +440,21 @@ static auto& room_setup = addr_as_ref<int __cdecl(void* room, const Vector3* pos
 static auto& room_cleanup = addr_as_ref<void __cdecl()>(0x00488BB0);
 
 // The Preferences page holding the editor's user configurable colours; the viewport painter
-// (0x0047DAE0) feeds the first one, at +0x424, to set_draw_color before its clear.
-static auto& editor_color_prefs = addr_as_ref<void* __cdecl()>(0x00483E10);
-constexpr uintptr_t editor_prefs_background_color = 0x424;
-// Current draw/clear colour bytes, in the order set_draw_color takes them.
-static auto& gr_current_color = addr_as_ref<uint8_t[4]>(0x014CF79C);
+// (0x0047DAE0) feeds the background one to set_draw_color before its clear.
+struct EditorColorPrefs
+{
+    uint8_t pad_00[0x424];
+    COLORREF background;
+};
+static_assert(offsetof(EditorColorPrefs, background) == 0x424);
+static auto& editor_color_prefs = addr_as_ref<EditorColorPrefs* __cdecl()>(0x00483E10);
 
 // character_mesh_load_action: __thiscall on mesh_data, loads .rfa file, returns action index
 using EditorCharMeshLoadActionFn = int(__thiscall*)(void* mesh_data, const char* rfa_filename, char is_state, char unused);
 static const auto character_mesh_load_action = reinterpret_cast<EditorCharMeshLoadActionFn>(0x004C2150);
 
 // vmesh_play_action_by_index: cdecl wrapper
-static auto& vmesh_play_action_by_index = addr_as_ref<void(EditorVMesh* vmesh, int action_index, float transition_time, int hold_last_frame)>(0x004C0760);
-// vmesh_get_action_duration: returns duration in seconds for given action index
-static auto& vmesh_get_action_duration = addr_as_ref<float(EditorVMesh* vmesh, int action_index)>(0x004C0790);
+static auto& vmesh_play_action_by_index = addr_as_ref<void(EditorVMesh* vmesh, int action_index, float weight, int hold_last_frame)>(0x004C0760);
 // vmesh_reset_actions: clears all active action slots
 static auto& vmesh_reset_actions = addr_as_ref<void(EditorVMesh* vmesh)>(0x004C07A0);
 
@@ -550,6 +583,54 @@ static_assert(sizeof(GrVertex) == 0x30);
 
 // ─── Rendering pipeline ──────────────────────────────────────────────────────
 
+namespace red
+{
+    struct GrScreen
+    {
+        int signature;
+        int max_width;
+        int max_height;
+        int mode;
+        int window_mode;
+        int field_14;
+        float aspect;
+        int field_1c;
+        int bits_per_pixel;
+        int bytes_ber_pixel;
+        int field_28;
+        int offset_x;
+        int offset_y;
+        int clip_width;
+        int clip_height;
+        int max_tex_width;
+        int max_tex_height;
+        int clip_left;
+        int clip_right;
+        int clip_top;
+        int clip_bottom;
+        // Draw/clear colour bytes in the order set_draw_color takes them, so the low byte is red.
+        int current_color;
+        int current_bitmap;
+        int current_bitmap2;
+        int fog_mode;
+        int fog_color;
+        float fog_near;
+        float fog_far;
+        float fog_far_scaled;
+        bool recolor_enabled;
+        float recolor_red;
+        float recolor_green;
+        float recolor_blue;
+        int field_84;
+        int field_88;
+        int zbuffer_mode;
+    };
+    static_assert(sizeof(GrScreen) == 0x90);
+    static_assert(offsetof(GrScreen, current_color) == 0x54);
+
+    static auto& gr_screen = addr_as_ref<GrScreen>(0x014CF748);
+}
+
 // D3D8 device pointer
 static auto& d3d_device_ptr = addr_as_ref<void*>(0x0183b914);
 
@@ -607,6 +688,7 @@ struct EditorVfsFile
     const char* name;
     EditorVfsFile* next;
 };
+static_assert(sizeof(EditorVfsFile) == 0xC);
 static auto& vfs_file_buckets = addr_as_ref<EditorVfsFile*[0x8000]>(0x01622004);
 
 // One .vpp directory entry. Names come from a 60 byte fixed record, so they are not

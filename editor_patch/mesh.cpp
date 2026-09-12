@@ -44,6 +44,10 @@ static bool mesh_play_v3c_action(EditorVMesh* vmesh, const char* action_name,
     if (vmesh->type != VMESH_TYPE_CHARACTER) return false;
     if (!vmesh->mesh) return false;
 
+    // Recorded before the attempt, so an animation that cannot be played is not revalidated and
+    // warned about on every frame the simulate flag is compared against it.
+    g_v3c_action_simulating[vmesh] = simulate;
+
     // character_mesh_load_action returns 0 rather than -1 for a missing file, and the engine
     // indexes an animation's bone table with the character's own bone index without a bounds
     // check, so the file has to be proven readable and compatible before it is handed over.
@@ -67,7 +71,6 @@ static bool mesh_play_v3c_action(EditorVMesh* vmesh, const char* action_name,
     }
 
     g_v3c_action_cache[vmesh] = action_index;
-    g_v3c_action_simulating[vmesh] = simulate;
 
     mesh_play_v3c_action_looping(vmesh, action_index);
     return true;

@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <xlog/xlog.h>
+#include "file_dialogs.h"
 #include "level.h"
 #include "textures.h"
 #include "resources.h"
@@ -668,7 +669,7 @@ void handle_brush_convert()
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     ofn.lpstrTitle = "Export Brush as V3M Mesh";
 
-    if (!GetSaveFileNameA(&ofn)) return;
+    if (!alpine_get_save_file_name(&ofn)) return;
 
     // Derive base name from filename (used for submesh naming)
     const char* file_base = std::strrchr(filename, '\\');

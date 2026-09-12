@@ -4,14 +4,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <stdexcept>
-#include <string>
-#include <vector>
 #include "alpine_color_picker.h"
 #include "mfc_types.h"
 #include "resources.h"
-
-extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace
 {
@@ -64,7 +59,18 @@ struct ColorPickerState
     COLORREF sample_color;
 };
 
-WNDPROC g_surface_orig_wndproc = nullptr;
+// Each subclassed surface keeps its own original proc in its window data rather than sharing one.
+WNDPROC surface_orig_wndproc(HWND ctl)
+{
+    return reinterpret_cast<WNDPROC>(GetWindowLongPtrA(ctl, GWLP_USERDATA));
+}
+
+LRESULT surface_default(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    WNDPROC orig = surface_orig_wndproc(hwnd);
+    return orig ? CallWindowProcA(orig, hwnd, msg, wparam, lparam)
+                : DefWindowProcA(hwnd, msg, wparam, lparam);
+}
 
 uint32_t to_dib_pixel(COLORREF color)
 {
@@ -478,12 +484,11 @@ void update_hue_from_point(ColorPickerState& state, HWND ctl, POINT pt)
 
 LRESULT CALLBACK ColorSurfaceProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-    WNDPROC orig = g_surface_orig_wndproc;
     HWND hdlg = GetParent(hwnd);
     ColorPickerState* state = hdlg ? get_state(hdlg) : nullptr;
     const int id = GetDlgCtrlID(hwnd);
     if (!state) {
-        return CallWindowProcA(orig, hwnd, msg, wparam, lparam);
+        return surface_default(hwnd, msg, wparam, lparam);
     }
 
     switch (msg) {
@@ -607,12 +612,14 @@ LRESULT CALLBACK ColorSurfaceProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
         state->drag_hue = false;
         break;
     case WM_NCDESTROY:
-        SetWindowLongPtrA(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(orig));
+        if (WNDPROC orig = surface_orig_wndproc(hwnd)) {
+            SetWindowLongPtrA(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(orig));
+        }
         break;
     default:
         break;
     }
-    return CallWindowProcA(orig, hwnd, msg, wparam, lparam);
+    return surface_default(hwnd, msg, wparam, lparam);
 }
 
 void subclass_surface(HWND hdlg, int id)
@@ -624,7 +631,7 @@ void subclass_surface(HWND hdlg, int id)
     WNDPROC prev = reinterpret_cast<WNDPROC>(
         SetWindowLongPtrA(ctl, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ColorSurfaceProc)));
     if (prev != ColorSurfaceProc) {
-        g_surface_orig_wndproc = prev;
+        SetWindowLongPtrA(ctl, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(prev));
     }
 }
 
@@ -662,6 +669,7 @@ INT_PTR CALLBACK ColorPickerDialogProc(HWND hdlg, UINT msg, WPARAM wparam, LPARA
     switch (msg) {
     case WM_INITDIALOG:
         SetWindowLongPtrA(hdlg, GWLP_USERDATA, lparam);
+        alpine_center_dialog_on_owner(hdlg);
         init_dialog(hdlg, *reinterpret_cast<ColorPickerState*>(lparam));
         return TRUE;
     case WM_SETCURSOR:

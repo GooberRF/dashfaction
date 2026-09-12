@@ -896,26 +896,22 @@ CodeInjection CColorDialog_ct_seed_current_color{
 
 // CColorDialog::DoModal is the single choke point for every stock color site: its whole body is
 // PreModal, ChooseColorA on the embedded CHOOSECOLOR (this+0x5C), PostModal, return IDOK/IDCANCEL.
-int __fastcall CColorDialog_DoModal_new(void* this_);
+int __fastcall CColorDialog_DoModal_new(CColorDialog* this_);
 FunHook CColorDialog_DoModal_hook{
     0x0052D46B,
     CColorDialog_DoModal_new,
 };
-int __fastcall CColorDialog_DoModal_new(void* this_)
+int __fastcall CColorDialog_DoModal_new(CColorDialog* this_)
 {
-    auto& hwnd_owner = struct_field_ref<HWND>(this_, 0x60);
-    auto& rgb_result = struct_field_ref<COLORREF>(this_, 0x68);
-    auto* custom_colors = struct_field_ref<COLORREF*>(this_, 0x6C);
-
-    HWND parent = AddrCaller{0x0052F3A9}.this_call<HWND>(this_);
-    hwnd_owner = parent;
-    COLORREF color = rgb_result & 0xFFFFFF;
-    auto result = alpine_pick_color_ex(parent, color, custom_colors);
-    AddrCaller{0x0052F3E3}.this_call(this_);
+    HWND parent = this_->PreModal();
+    this_->m_cc.hwndOwner = parent;
+    COLORREF color = this_->m_cc.rgbResult & 0xFFFFFF;
+    auto result = alpine_pick_color_ex(parent, color, this_->m_cc.lpCustColors);
+    this_->PostModal();
 
     switch (result) {
         case AlpineColorPickerResult::ok:
-            rgb_result = color;
+            this_->m_cc.rgbResult = color;
             return IDOK;
         case AlpineColorPickerResult::cancelled:
             return IDCANCEL;

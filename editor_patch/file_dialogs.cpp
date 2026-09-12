@@ -12,8 +12,9 @@ namespace
 {
 
 // RED.exe IAT slots for COMDLG32!GetOpenFileNameA / GetSaveFileNameA. MFC's CFileDialog::DoModal
-// (0x0052CFD9) is the only stock caller, so shimming the imports upgrades every editor dialog as
-// well as Alpine's own OPENFILENAME sites.
+// (0x0052CFD9) is the only stock caller, so shimming the imports upgrades every editor dialog.
+// AlpineEditor.dll imports COMDLG32 through its own table, which these slots are not, so Alpine's
+// own OPENFILENAME sites have to call the shim entry point directly.
 constexpr unsigned get_open_file_name_iat = 0x005546E4;
 constexpr unsigned get_save_file_name_iat = 0x005546E8;
 
@@ -58,7 +59,9 @@ private:
 };
 
 // RED only initialises COM lazily in its sound paths, so the shim owns the apartment for the
-// duration of the dialog unless one already exists.
+// duration of the dialog unless one already exists. RPC_E_CHANGED_MODE means the thread is already
+// in a multi-threaded apartment, where driving the shell's single-threaded dialog object is not
+// allowed, so the call goes back to COMDLG32 instead.
 class ComInit
 {
 public:
@@ -74,7 +77,7 @@ public:
             CoUninitialize();
         }
     }
-    bool usable() const { return SUCCEEDED(hr_) || hr_ == RPC_E_CHANGED_MODE; }
+    bool usable() const { return SUCCEEDED(hr_); }
 
 private:
     HRESULT hr_ = E_FAIL;
@@ -197,6 +200,49 @@ DialogOutcome write_back(IFileDialog* dialog, OPENFILENAMEA* ofn, const std::str
     return DialogOutcome::ok;
 }
 
+class CoTaskMemString
+{
+public:
+    CoTaskMemString() = default;
+    CoTaskMemString(const CoTaskMemString&) = delete;
+    CoTaskMemString& operator=(const CoTaskMemString&) = delete;
+    ~CoTaskMemString()
+    {
+        if (ptr_) {
+            CoTaskMemFree(ptr_);
+        }
+    }
+    PWSTR* put() { return &ptr_; }
+    PWSTR get() const { return ptr_; }
+
+private:
+    PWSTR ptr_ = nullptr;
+};
+
+DialogOutcome collect_result(IFileDialog* dialog, OPENFILENAMEA* ofn)
+{
+    ComPtr<IShellItem> item;
+    HRESULT hr = dialog->GetResult(item.put());
+    if (FAILED(hr) || !item) {
+        xlog::warn("file dialog: GetResult failed ({:#x}), treating as cancel",
+                   static_cast<unsigned>(hr));
+        return DialogOutcome::cancelled;
+    }
+    CoTaskMemString wide_path;
+    hr = item->GetDisplayName(SIGDN_FILESYSPATH, wide_path.put());
+    if (FAILED(hr) || !wide_path.get()) {
+        xlog::warn("file dialog: the chosen item has no file system path ({:#x}), treating as "
+                   "cancel", static_cast<unsigned>(hr));
+        return DialogOutcome::cancelled;
+    }
+    const std::string path = narrow(wide_path.get());
+    if (path.empty()) {
+        xlog::warn("file dialog: the chosen path cannot be represented in the editor's code page");
+        return DialogOutcome::cancelled;
+    }
+    return write_back(dialog, ofn, path);
+}
+
 DialogOutcome show_dialog(OPENFILENAMEA* ofn, bool save)
 {
     if (!ofn || ofn->lStructSize < min_struct_size || !ofn->lpstrFile || !ofn->nMaxFile) {
@@ -212,6 +258,11 @@ DialogOutcome show_dialog(OPENFILENAMEA* ofn, bool save)
         return DialogOutcome::unsupported;
     }
 
+    // Every string handed to the dialog outlives it: IFileDialog is not documented to copy them.
+    std::vector<std::wstring> filter_text;
+    std::wstring initial_name;
+    std::wstring title;
+    std::wstring defext;
     ComPtr<IFileDialog> dialog;
     HRESULT hr = CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr,
                                   CLSCTX_INPROC_SERVER, IID_IFileDialog,
@@ -222,29 +273,28 @@ DialogOutcome show_dialog(OPENFILENAMEA* ofn, bool save)
     }
 
     DWORD options = 0;
-    dialog->GetOptions(&options);
-    options |= FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR;
-    if (ofn->Flags & OFN_OVERWRITEPROMPT) {
-        options |= FOS_OVERWRITEPROMPT;
+    // Without the shell's own defaults there is nothing to add to, so they are left alone.
+    if (SUCCEEDED(dialog->GetOptions(&options))) {
+        options |= FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR;
+        if (ofn->Flags & OFN_OVERWRITEPROMPT) {
+            options |= FOS_OVERWRITEPROMPT;
+        }
+        if (ofn->Flags & OFN_FILEMUSTEXIST) {
+            options |= FOS_FILEMUSTEXIST;
+        }
+        if (ofn->Flags & OFN_PATHMUSTEXIST) {
+            options |= FOS_PATHMUSTEXIST;
+        }
+        dialog->SetOptions(options);
     }
-    if (ofn->Flags & OFN_FILEMUSTEXIST) {
-        options |= FOS_FILEMUSTEXIST;
-    }
-    if (ofn->Flags & OFN_PATHMUSTEXIST) {
-        options |= FOS_PATHMUSTEXIST;
-    }
-    dialog->SetOptions(options);
 
-    std::vector<std::wstring> filter_text;
-    std::wstring initial_name;
     apply_filters(dialog.get(), ofn, filter_text);
     apply_initial_name(dialog.get(), ofn, initial_name);
-    const std::wstring title = widen(ofn->lpstrTitle);
+    title = widen(ofn->lpstrTitle);
     if (!title.empty()) {
         dialog->SetTitle(title.c_str());
     }
-    const std::wstring defext =
-        widen(alpine_file_dialog_normalize_defext(ofn->lpstrDefExt).c_str());
+    defext = widen(alpine_file_dialog_normalize_defext(ofn->lpstrDefExt).c_str());
     if (!defext.empty()) {
         dialog->SetDefaultExtension(defext.c_str());
     }
@@ -258,53 +308,62 @@ DialogOutcome show_dialog(OPENFILENAMEA* ofn, bool save)
         return DialogOutcome::unsupported;
     }
 
-    ComPtr<IShellItem> item;
-    if (FAILED(dialog->GetResult(item.put())) || !item) {
-        return DialogOutcome::unsupported;
+    // The dialog has been shown, so a failure past this point is reported as a cancel rather than
+    // handed on to COMDLG32, which would put a second dialog in front of the user. A throw counts
+    // as a failure, so it stops here rather than reaching run_dialog's fallback.
+    try {
+        return collect_result(dialog.get(), ofn);
     }
-    PWSTR wide_path = nullptr;
-    if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &wide_path)) || !wide_path) {
-        return DialogOutcome::unsupported;
-    }
-    const std::string path = narrow(wide_path);
-    CoTaskMemFree(wide_path);
-    if (path.empty()) {
-        xlog::warn("file dialog: the chosen path cannot be represented in the editor's code page");
+    catch (...) {
+        xlog::error("file dialog: reading back the chosen path failed, treating as cancel");
         return DialogOutcome::cancelled;
     }
-    return write_back(dialog.get(), ofn, path);
+}
+
+// A C++ exception unwinding out of here would have to pass RED's SEH frames, which corrupts, so
+// anything that escapes the dialog leaves the call to the stock one.
+BOOL run_dialog(LPOPENFILENAMEA ofn, bool save, GetFileNameFn fallback)
+{
+    try {
+        switch (show_dialog(ofn, save)) {
+        case DialogOutcome::ok:
+            return TRUE;
+        case DialogOutcome::cancelled:
+            return FALSE;
+        default:
+            break;
+        }
+    }
+    catch (...) {
+        xlog::error("file dialog: the modern dialog failed, falling back to the stock one");
+    }
+    return fallback ? fallback(ofn) : FALSE;
 }
 
 BOOL WINAPI GetOpenFileNameA_alpine(LPOPENFILENAMEA ofn)
 {
-    switch (show_dialog(ofn, false)) {
-    case DialogOutcome::ok:
-        return TRUE;
-    case DialogOutcome::cancelled:
-        return FALSE;
-    default:
-        break;
-    }
-    return g_orig_get_open_file_name ? g_orig_get_open_file_name(ofn) : FALSE;
+    return run_dialog(ofn, false, g_orig_get_open_file_name);
 }
 
 BOOL WINAPI GetSaveFileNameA_alpine(LPOPENFILENAMEA ofn)
 {
-    switch (show_dialog(ofn, true)) {
-    case DialogOutcome::ok:
-        return TRUE;
-    case DialogOutcome::cancelled:
-        return FALSE;
-    default:
-        break;
-    }
-    return g_orig_get_save_file_name ? g_orig_get_save_file_name(ofn) : FALSE;
+    return run_dialog(ofn, true, g_orig_get_save_file_name);
 }
 
 } // namespace
 
+BOOL alpine_get_save_file_name(OPENFILENAMEA* ofn)
+{
+    return run_dialog(ofn, true, &GetSaveFileNameA);
+}
+
 void ApplyFileDialogPatches()
 {
+    static bool installed = false;
+    if (installed) {
+        return;
+    }
+    installed = true;
     g_orig_get_open_file_name = addr_as_ref<GetFileNameFn>(get_open_file_name_iat);
     g_orig_get_save_file_name = addr_as_ref<GetFileNameFn>(get_save_file_name_iat);
     write_mem_ptr(get_open_file_name_iat, &GetOpenFileNameA_alpine);

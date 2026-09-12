@@ -1,11 +1,44 @@
 #pragma once
 
 #include <windows.h>
+#include <commdlg.h>
 #include <patch_common/MemUtils.h>
 #include <mbstring.h>
 #include <algorithm>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
+
+// Alpine's dialog templates carry no DS_CENTER, so a modal opens at its owner's top left unless it
+// is placed in WM_INITDIALOG. Kept inside the owner's monitor work area.
+inline void alpine_center_dialog_on_owner(HWND hdlg)
+{
+    HWND owner = GetWindow(hdlg, GW_OWNER);
+    if (!owner) {
+        owner = GetDesktopWindow();
+    }
+    RECT owner_rect;
+    RECT dlg_rect;
+    if (!owner || !GetWindowRect(owner, &owner_rect) || !GetWindowRect(hdlg, &dlg_rect)) {
+        return;
+    }
+    const int width = dlg_rect.right - dlg_rect.left;
+    const int height = dlg_rect.bottom - dlg_rect.top;
+    int x = static_cast<int>(owner_rect.left) + ((owner_rect.right - owner_rect.left) - width) / 2;
+    int y = static_cast<int>(owner_rect.top) + ((owner_rect.bottom - owner_rect.top) - height) / 2;
+
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoA(MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST), &info)) {
+        const int left = static_cast<int>(info.rcWork.left);
+        const int top = static_cast<int>(info.rcWork.top);
+        x = std::clamp(x, left, std::max(left, static_cast<int>(info.rcWork.right) - width));
+        y = std::clamp(y, top, std::max(top, static_cast<int>(info.rcWork.bottom) - height));
+    }
+    SetWindowPos(hdlg, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
 
 struct CWnd_mbrs
 {
@@ -523,15 +556,38 @@ static_assert(sizeof(DedBoltEmitter) == 0xD4, "DedBoltEmitter size mismatch");
 
 struct CDialog_mbrs
 {
-    char padding[0x58]; // placeholder
+    char padding[0x4C]; // placeholder
+    CWnd* m_pParentWnd; // owner PreModal disables, read at 0x0052F3C2
+    HWND m_hWndTop;     // the window PostModal re-enables, written through at 0x0052F3CC
+    char padding2[0x4];
 };
 
 struct CDialog
 {
     void* _vft;
     CDialog_mbrs _d;
+
+    // Disables the owner and registers the modal state, returning the window to parent the dialog
+    // to. Both halves are the whole of what CColorDialog::DoModal does around ChooseColorA.
+    HWND PreModal()
+    {
+        return AddrCaller{0x0052F3A9}.this_call<HWND>(this);
+    }
+
+    void PostModal()
+    {
+        AddrCaller{0x0052F3E3}.this_call(this);
+    }
 };
 static_assert(sizeof(CDialog) == 0x5C, "CDialog size mismatch!");
+static_assert(offsetof(CDialog, _d.m_pParentWnd) == 0x50, "m_pParentWnd offset mismatch!");
+static_assert(offsetof(CDialog, _d.m_hWndTop) == 0x54, "m_hWndTop offset mismatch!");
+
+struct CColorDialog : CDialog
+{
+    CHOOSECOLORA m_cc;
+};
+static_assert(offsetof(CColorDialog, m_cc) == 0x5C, "CColorDialog m_cc offset mismatch!");
 
 struct CEdit : CWnd
 {
