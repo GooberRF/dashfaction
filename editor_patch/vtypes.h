@@ -233,6 +233,9 @@ struct EditorVifMesh
     int tex_handles[7];
     int num_texture_handles;
     int flags;
+    // The LOD's own vertex count, which is also the length of every chunk's orig_map:
+    // 0x0050D640 writes both from the same v3d LOD header field and sizes the map at
+    // num_original_vecs * 2 bytes.
     int num_original_vecs;
     int unk_field_from_v3d_file;
 };
@@ -241,6 +244,11 @@ static_assert(offsetof(EditorVifMesh, chunks) == 0x08);
 static_assert(offsetof(EditorVifMesh, num_chunks) == 0x0C);
 static_assert(offsetof(EditorVifMesh, tex_handles) == 0x20);
 static_assert(offsetof(EditorVifMesh, num_texture_handles) == 0x3C);
+static_assert(offsetof(EditorVifMesh, flags) == 0x40);
+static_assert(offsetof(EditorVifMesh, num_original_vecs) == 0x44);
+
+// EditorVifMesh::flags bit that gives every chunk an orig_map (v3d V3D_LOD_MORPH_VERTICES_MAP).
+constexpr int VIF_LOD_MORPH_VERTICES_MAP = 0x1;
 
 struct EditorVifLodMesh
 {
@@ -300,15 +308,49 @@ struct EditorCharacterMesh
 };
 static_assert(sizeof(EditorCharacterMesh) == 0x94);
 
-// .v3c character; only the mesh table at the tail is mirrored
+// .v3c character; only the bone count and the mesh table at the tail are mirrored
 struct EditorCharacter
 {
-    uint8_t pad_00[0x19BC];
+    uint8_t pad_00[0x48];
+    int num_bones; // written from the BONE section by 0x004C1FC3
+    uint8_t pad_4C[0x19BC - 0x4C];
     int num_character_meshes;
     EditorCharacterMesh character_meshes[1];
 };
+static_assert(offsetof(EditorCharacter, num_bones) == 0x48);
 static_assert(offsetof(EditorCharacter, num_character_meshes) == 0x19BC);
 static_assert(offsetof(EditorCharacter, character_meshes) == 0x19C0);
+
+// .v3c instance (0x1D5C bytes, allocated at 0x004BE41F); only the action hold state is mirrored.
+struct EditorCharacterInstance
+{
+    uint8_t pad_0000[0x1D4C];
+    // Raised by 0x004DB950 when the action named by the hold flag reaches its end, which also
+    // makes that function early-return until ci_play_action (0x004DC090) clears it again.
+    uint8_t action_held;
+    uint8_t pad_1D4D[0x1D5C - 0x1D4D];
+};
+static_assert(sizeof(EditorCharacterInstance) == 0x1D5C);
+static_assert(offsetof(EditorCharacterInstance, action_held) == 0x1D4C);
+
+// Base characters live in a fixed table of 64 entries (0x014FFB10, stride 0x1A58) with bit 0 of
+// +0x44 marking a slot in use. character_load_or_create reuses an entry whose name matches and
+// otherwise takes a free one; with all 64 taken it raises the fatal "No more base character room"
+// error at 0x004C2D39, which ends the process. Nothing in stock RED ever releases a slot:
+// character_free is the allocator's counterpart and has no callers.
+constexpr unsigned editor_max_base_characters = 64;
+static auto& character_free = addr_as_ref<void __cdecl(void* character)>(0x004C2DD0);
+
+inline unsigned editor_base_characters_in_use()
+{
+    unsigned count = 0;
+    for (unsigned i = 0; i < editor_max_base_characters; ++i) {
+        if (addr_as_ref<int>(0x014FFB10 + i * 0x1A58 + 0x44) & 1) {
+            ++count;
+        }
+    }
+    return count;
+}
 
 struct EditorRenderParams; // forward declaration for vmesh_render
 
@@ -349,6 +391,29 @@ static auto& gr_bitmap_scaled = addr_as_ref<char(int bm_handle, int dst_x, int d
 // Draw mode the stock bitmap preview passes to gr_bitmap_scaled.
 static auto& gr_bitmap_preview_mode = addr_as_ref<uint32_t>(0x0147D6A0);
 
+// Camera setup, as the viewport painter (0x0047DAE0) calls it: orientation rows are
+// right/up/forward, and the last argument selects the perspective projection.
+static auto& gr_setup_3d = addr_as_ref<void __cdecl(const Matrix3* orient, const Vector3* pos,
+                                                    float h_fov, bool zbuffer, bool perspective)>(0x004C5980);
+
+// The perspective frustum 0x004ED5A0 builds puts its near plane through the camera position
+// itself, so this far distance is the only clip range the caller can steer; <= 1.0 disables it
+// and stores 0, which makes the stored value an exact restore argument.
+static auto& gr_set_far_clip = addr_as_ref<void __cdecl(float dist)>(0x004C5B30);
+static auto& gr_far_clip_dist = addr_as_ref<float>(0x0158F3F8);
+
+// Gathers the scene lights reaching a sphere into the render light list; paired with room_cleanup.
+static auto& room_setup = addr_as_ref<int __cdecl(void* room, const Vector3* pos, float radius,
+                                                  int include_static, int include_dynamic)>(0x004885D0);
+static auto& room_cleanup = addr_as_ref<void __cdecl()>(0x00488BB0);
+
+// The Preferences page holding the editor's user configurable colours; the viewport painter
+// (0x0047DAE0) feeds the first one, at +0x424, to set_draw_color before its clear.
+static auto& editor_color_prefs = addr_as_ref<void* __cdecl()>(0x00483E10);
+constexpr uintptr_t editor_prefs_background_color = 0x424;
+// Current draw/clear colour bytes, in the order set_draw_color takes them.
+static auto& gr_current_color = addr_as_ref<uint8_t[4]>(0x014CF79C);
+
 // character_mesh_load_action: __thiscall on mesh_data, loads .rfa file, returns action index
 using EditorCharMeshLoadActionFn = int(__thiscall*)(void* mesh_data, const char* rfa_filename, char is_state, char unused);
 static const auto character_mesh_load_action = reinterpret_cast<EditorCharMeshLoadActionFn>(0x004C2150);
@@ -365,6 +430,10 @@ static auto& draw_3d_arrow = addr_as_ref<void(float, float, float, float, float,
 static auto& project_to_screen = addr_as_ref<uint32_t(void* screen_out, const void* world_pos)>(0x004C5E30);
 static auto& set_draw_color = addr_as_ref<void(uint32_t r, uint32_t g, uint32_t b, uint32_t a)>(0x004B9700);
 static auto& gr_set_bitmap = addr_as_ref<void(int bm_handle, int unk)>(0x004B97E0);
+// Nonzero while the viewports draw textured rather than wireframe.
+static auto& editor_textures_enabled = addr_as_ref<int>(0x006C9AA8);
+// Set around a .vfx draw so the renderer takes its transparency path.
+static auto& vfx_render_transparent = addr_as_ref<int>(0x0059E21C);
 static auto& gr_render_billboard = addr_as_ref<void(void* pos, int unk, float scale, float param)>(0x004CB360);
 static auto& draw_line_2d = addr_as_ref<uint32_t(const void* pt1, const void* pt2, uint32_t mode)>(0x004CB150);
 static auto& project_to_screen_2d = addr_as_ref<bool(const void* world_pos, float* out_x, float* out_y)>(0x004C6630);
@@ -388,6 +457,10 @@ enum EditorRenderFlag : uint32_t
 {
     ERF_TEXTURED            = 0x2,
     ERF_SELECTION_HIGHLIGHT = 0x20,
+    // Without this the renderer overwrites ambient_color with the scene lighting sampled at the
+    // draw position (0x00507890); with it the two fixed key lights 0x00505920 builds from
+    // ambient_color are the whole result.
+    ERF_CUSTOM_AMBIENT      = 0x80,
 };
 
 // VMesh render parameters
@@ -403,7 +476,7 @@ struct EditorRenderParams
     uint32_t field_1C;
     uint32_t field_20;
     uint32_t field_24;
-    Color field_28;
+    Color ambient_color;
     Matrix3 orient;
 
     EditorRenderParams()
@@ -511,6 +584,60 @@ static auto& light_free = addr_as_ref<void __cdecl(int light_handle, int unk)>(0
 static auto& light_accum_at_texel =
     addr_as_ref<void __cdecl(float* r, float* g, float* b, const Vector3* pos, const Vector3* normal,
                              void* masks, int texel_index, const void* smooth_flag)>(0x004894C0);
+
+// ─── Virtual file system ─────────────────────────────────────────────────────
+
+// Search paths registered through file_add_path. Slot 0 is the game root and has no path
+// string; file_add_path inserts the separator itself, so `path` carries none.
+struct EditorVfsPath
+{
+    const char* path;
+    const char* extensions;
+    uint8_t cd_only;
+    uint8_t pad_09[3];
+};
+static_assert(sizeof(EditorVfsPath) == 0xC);
+constexpr int editor_vfs_path_count = 512;
+static auto& vfs_paths = addr_as_ref<EditorVfsPath[editor_vfs_path_count]>(0x0156B110);
+
+// Loose files found by file_scan_path, chained per name hash (0x004CF7B0 masks to 0x7FFF).
+struct EditorVfsFile
+{
+    int path_index;
+    const char* name;
+    EditorVfsFile* next;
+};
+static auto& vfs_file_buckets = addr_as_ref<EditorVfsFile*[0x8000]>(0x01622004);
+
+// One .vpp directory entry. Names come from a 60 byte fixed record, so they are not
+// guaranteed to be null terminated.
+struct EditorPackfileEntry
+{
+    int name_hash;
+    const char* name;
+    int field_08;
+    int size;
+    void* packfile;
+    int field_14;
+};
+static_assert(sizeof(EditorPackfileEntry) == 0x18);
+
+struct EditorPackfile
+{
+    char name[0x20];
+    char path[0x80];
+    int field_a0;
+    int num_entries;
+    EditorPackfileEntry* entries;
+    uint8_t pad_ac[4];
+};
+static_assert(sizeof(EditorPackfile) == 0xB0);
+static_assert(offsetof(EditorPackfile, num_entries) == 0xA4);
+constexpr int editor_packfile_max = 256;
+static auto& packfiles = addr_as_ref<EditorPackfile[editor_packfile_max]>(0x015DE820);
+static auto& num_packfiles = addr_as_ref<int>(0x01611F6C);
+// Shared entry pool every mounted packfile carves its directory out of.
+constexpr int editor_packfile_entry_max = 0x34BC;
 
 // ─── Misc ────────────────────────────────────────────────────────────────────
 

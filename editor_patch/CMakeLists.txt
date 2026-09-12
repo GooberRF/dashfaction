@@ -1,8 +1,12 @@
 set(SRCS
     exports.h
+    alpine_color_picker.cpp
+    alpine_color_picker.h
     alpine_obj.cpp
     alpine_obj.h
     event.cpp
+    file_dialogs.cpp
+    file_dialogs.h
     geometry.cpp
     graphics.cpp
     headless_bake.cpp
@@ -11,6 +15,8 @@ set(SRCS
     main.cpp
     mesh.cpp
     mesh.h
+    mesh_browser.cpp
+    mesh_browser.h
     note.cpp
     note.h
     corona.cpp
@@ -62,5 +68,8 @@ target_link_libraries(AlpineEditor
     Xlog
     CrashHandlerStub
     shlwapi
+    ole32
+    shell32
+    uuid
     stb_image
 )

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <vector>
 #include <xlog/xlog.h>
+#include "alpine_color_picker.h"
 #include "weather_region.h"
 #include "level.h"
 #include "resources.h"
@@ -232,9 +233,10 @@ static int weather_region_resolve_bitmap(const char* name)
     if (strlen(name) > rfl_name_max_len) return -1;
     const char* ext = strrchr(name, '.');
     if (ext && strlen(ext) > rfl_ext_max_len) return -1;
+    // open (0x004CF9A0) locates the file without opening a stream, so no close belongs here:
+    // close (0x004CFF60) would index the open file table at slot -1 (the constructor's value).
     rf::File file;
     if (!file.open(name)) return -1;
-    file.close(); // rf::File has no destructor, so the probe leaks the OS handle otherwise
     return bm_load(name, -1, 1);
 }
 
@@ -404,20 +406,14 @@ static void weather_region_update_type_fields(HWND hdlg)
 
 static void weather_region_pick_color(HWND hdlg, int idc_r, int idc_g, int idc_b)
 {
-    CHOOSECOLORA cc = {};
-    static COLORREF custom_colors[16] = {};
-    cc.lStructSize = sizeof(cc);
-    cc.hwndOwner = hdlg;
-    cc.rgbResult = RGB(
-        GetDlgItemInt(hdlg, idc_r, nullptr, FALSE),
-        GetDlgItemInt(hdlg, idc_g, nullptr, FALSE),
-        GetDlgItemInt(hdlg, idc_b, nullptr, FALSE));
-    cc.lpCustColors = custom_colors;
-    cc.Flags = CC_RGBINIT | CC_FULLOPEN;
-    if (ChooseColorA(&cc)) {
-        SetDlgItemInt(hdlg, idc_r, GetRValue(cc.rgbResult), FALSE);
-        SetDlgItemInt(hdlg, idc_g, GetGValue(cc.rgbResult), FALSE);
-        SetDlgItemInt(hdlg, idc_b, GetBValue(cc.rgbResult), FALSE);
+    COLORREF color = RGB(
+        std::min(GetDlgItemInt(hdlg, idc_r, nullptr, FALSE), 255u),
+        std::min(GetDlgItemInt(hdlg, idc_g, nullptr, FALSE), 255u),
+        std::min(GetDlgItemInt(hdlg, idc_b, nullptr, FALSE), 255u));
+    if (alpine_pick_color(hdlg, color, alpine_shared_custom_colors())) {
+        SetDlgItemInt(hdlg, idc_r, GetRValue(color), FALSE);
+        SetDlgItemInt(hdlg, idc_g, GetGValue(color), FALSE);
+        SetDlgItemInt(hdlg, idc_b, GetBValue(color), FALSE);
     }
 }
 

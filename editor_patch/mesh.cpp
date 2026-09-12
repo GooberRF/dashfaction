@@ -1,6 +1,5 @@
 #include <windows.h>
 #include <commctrl.h>
-#include <commdlg.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -13,6 +12,7 @@
 #include <patch_common/CodeInjection.h>
 #include <patch_common/FunHook.h>
 #include "mesh.h"
+#include "mesh_browser.h"
 #include "mfc_types.h"
 #include "level.h"
 #include "resources.h"
@@ -27,19 +27,6 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 // Forward declarations
 static void mesh_apply_texture_overrides(DedMesh* mesh);
 
-static const char* get_meshes_dir()
-{
-    static char path[MAX_PATH] = {};
-    if (!path[0]) {
-        DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
-        if (len == 0 || len >= MAX_PATH) { path[0] = '\0'; return path; }
-        char* last_sep = strrchr(path, '\\');
-        if (last_sep) *(last_sep + 1) = '\0';
-        strcat_s(path, "user_maps\\meshes");
-    }
-    return path;
-}
-
 // DedObject::vmesh is void* (stock struct), this helper provides typed access
 static EditorVMesh* get_vmesh(DedMesh* mesh) { return static_cast<EditorVMesh*>(mesh->vmesh); }
 
@@ -47,8 +34,6 @@ static EditorVMesh* get_vmesh(DedMesh* mesh) { return static_cast<EditorVMesh*>(
 static std::unordered_map<EditorVMesh*, int> g_v3c_action_cache;
 // Track whether simulate_in_editor was active when the action was last set up
 static std::unordered_map<EditorVMesh*, bool> g_v3c_action_simulating;
-// Track elapsed time for manually looping one-shot actions in simulate mode
-static std::unordered_map<EditorVMesh*, float> g_v3c_action_elapsed;
 
 // ─── VMesh Loading ──────────────────────────────────────────────────────────
 
@@ -59,17 +44,17 @@ static bool mesh_play_v3c_action(EditorVMesh* vmesh, const char* action_name,
     if (vmesh->type != VMESH_TYPE_CHARACTER) return false;
     if (!vmesh->mesh) return false;
 
-    // Verify the animation file exists before loading (character_mesh_load_action
-    // returns 0 rather than -1 for missing files, which leads to garbage animation data)
-    rf::File file;
-    if (!file.open(action_name)) {
-        xlog::warn("[Mesh] Animation file '{}' not found, skipping", action_name);
+    // character_mesh_load_action returns 0 rather than -1 for a missing file, and the engine
+    // indexes an animation's bone table with the character's own bone index without a bounds
+    // check, so the file has to be proven readable and compatible before it is handed over.
+    if (!alpine_anim_playable_on(vmesh, action_name)) {
+        xlog::warn("[Mesh] Animation '{}' is missing or not compatible with this mesh, skipping",
+                   action_name);
         return false;
     }
 
-    // Always load as one-shot (is_state=0). vmesh_play_action_by_index silently
-    // ignores state actions (is_state=1), so we must use one-shot and manually
-    // handle looping by restarting the action when it expires.
+    // Always load as one-shot (is_state=0). ci_play_action (0x004DC090) refuses state actions
+    // outright, so looping is ours to drive.
     int action_index = character_mesh_load_action(vmesh->mesh, action_name, 0, 0);
     if (action_index < 0) {
         xlog::warn("[Mesh] Failed to load animation '{}' on vmesh {:p}", action_name, static_cast<void*>(vmesh));
@@ -83,28 +68,32 @@ static bool mesh_play_v3c_action(EditorVMesh* vmesh, const char* action_name,
 
     g_v3c_action_cache[vmesh] = action_index;
     g_v3c_action_simulating[vmesh] = simulate;
-    g_v3c_action_elapsed[vmesh] = 0.0f;
 
-    vmesh_stop_all_actions(vmesh);
-    vmesh_play_action_by_index(vmesh, action_index, 1.0f, 0);
+    mesh_play_v3c_action_looping(vmesh, action_index);
     return true;
 }
 
-void mesh_load_vmesh(DedMesh* mesh)
+// The fourth argument is ci_play_action's hold flag: instead of zeroing the action's weight and
+// dropping it from the list, the instance clamps the action at end_time and raises action_held,
+// which is what makes completion observable. ci_play_action writes the slot weight directly at
+// full value and resets the time in the same call, so nothing else is needed to restart.
+void mesh_play_v3c_action_looping(EditorVMesh* vmesh, int action_index)
 {
-    if (!mesh) return;
+    vmesh_stop_all_actions(vmesh);
+    vmesh_play_action_by_index(vmesh, action_index, 1.0f, 1);
+}
 
-    // Free existing vmesh if any
-    if (auto* v = get_vmesh(mesh)) {
-        g_v3c_action_cache.erase(v);
-        g_v3c_action_simulating.erase(v);
-        g_v3c_action_elapsed.erase(v);
-        vmesh_free(v);
-        mesh->vmesh = nullptr;
+bool mesh_v3c_action_finished(EditorVMesh* vmesh)
+{
+    if (!vmesh || !vmesh->instance) {
+        return false;
     }
+    return static_cast<const EditorCharacterInstance*>(vmesh->instance)->action_held != 0;
+}
 
-    const char* filename = mesh->mesh_filename.c_str();
-    if (!filename || filename[0] == '\0') return;
+EditorVMesh* mesh_load_vmesh_file(const char* filename)
+{
+    if (!filename || filename[0] == '\0') return nullptr;
 
     auto ext = get_ext_from_filename(filename);
 
@@ -115,6 +104,9 @@ void mesh_load_vmesh(DedMesh* mesh)
     else if (string_iequals(ext, "v3c") || string_iequals(ext, "vfx")) {
         // Both v3c and vfx loaders can trigger fatal errors if the file is missing.
         // Use RED's File class to check if the file exists (searches loose files + .vpp archives).
+        // open (0x004CF9A0) only locates the file, it never opens a stream and leaves
+        // open_file_index at the constructor's -1, so there is nothing to close: close
+        // (0x004CFF60) would index the open file table at slot -1 and fclose whatever it finds.
         rf::File file;
         if (file.open(filename)) {
             if (string_iequals(ext, "v3c")) {
@@ -129,20 +121,42 @@ void mesh_load_vmesh(DedMesh* mesh)
         }
     }
 
-    mesh->vmesh = vmesh;
-    mesh->vmesh_load_failed = (vmesh == nullptr);
     if (vmesh) {
         // Clear replacement material state to prevent stale data from memory reuse
         // (e.g. VFX vmesh freed then V3M allocated at same address with leftover flags)
         vmesh->replacement_materials = nullptr;
         vmesh->use_replacement_materials = false;
 
-        auto vtype = vmesh_get_type(vmesh);
         // Initialize VFX animation state (matches stock item setup in FUN_004151c0)
-        if (vtype == VMESH_TYPE_ANIM_FX) {
+        if (vmesh_get_type(vmesh) == VMESH_TYPE_ANIM_FX) {
             vmesh_anim_init(vmesh, 0, 1.0f);
             vmesh_process(vmesh, 0.0f, 0, nullptr, nullptr, 1);
         }
+    }
+    return vmesh;
+}
+
+void mesh_load_vmesh(DedMesh* mesh)
+{
+    if (!mesh) return;
+
+    // Free existing vmesh if any
+    if (auto* v = get_vmesh(mesh)) {
+        g_v3c_action_cache.erase(v);
+        g_v3c_action_simulating.erase(v);
+        vmesh_free(v);
+        mesh->vmesh = nullptr;
+    }
+
+    const char* filename = mesh->mesh_filename.c_str();
+    if (!filename || filename[0] == '\0') return;
+
+    EditorVMesh* vmesh = mesh_load_vmesh_file(filename);
+
+    mesh->vmesh = vmesh;
+    mesh->vmesh_load_failed = (vmesh == nullptr);
+    if (vmesh) {
+        auto vtype = vmesh_get_type(vmesh);
         // Play state animation for v3c skeletal meshes
         if (vtype == VMESH_TYPE_CHARACTER) {
             const char* anim = mesh->state_anim.c_str();
@@ -244,7 +258,6 @@ void DestroyDedMesh(DedMesh* mesh)
     if (auto* v = get_vmesh(mesh)) {
         g_v3c_action_cache.erase(v);
         g_v3c_action_simulating.erase(v);
-        g_v3c_action_elapsed.erase(v);
         vmesh_free(v);
         mesh->vmesh = nullptr;
     }
@@ -602,10 +615,10 @@ static void mesh_dialog_update_state(HWND hdlg)
     bool is_clutter = (IsDlgButtonChecked(hdlg, IDC_MESH_IS_CLUTTER) == BST_CHECKED);
     static const int clutter_controls[] = {
         IDC_MESH_CLUTTER_LIFE,
-        IDC_MESH_CLUTTER_DEBRIS, IDC_MESH_CLUTTER_DEBRIS_BROWSE,
+        IDC_MESH_CLUTTER_DEBRIS, IDC_MESH_CLUTTER_DEBRIS_SELECT,
         IDC_MESH_CLUTTER_VCLIP, IDC_MESH_CLUTTER_EXPLODE_RADIUS,
         IDC_MESH_CLUTTER_DEBRIS_VEL,
-        IDC_MESH_CLUTTER_CORPSE, IDC_MESH_CLUTTER_CORPSE_BROWSE,
+        IDC_MESH_CLUTTER_CORPSE, IDC_MESH_CLUTTER_CORPSE_SELECT,
         IDC_MESH_CLUTTER_CORPSE_STATE_ANIM, IDC_MESH_CLUTTER_CORPSE_COLLISION,
         IDC_MESH_CLUTTER_CORPSE_MATERIAL,
         IDC_MESH_CLUTTER_DMG_BASH, IDC_MESH_CLUTTER_DMG_BULLET,
@@ -886,22 +899,19 @@ static INT_PTR CALLBACK MeshDialogProc(HWND hdlg, UINT msg, WPARAM wparam, LPARA
             }
             return TRUE;
 
-        case IDC_MESH_BROWSE:
+        case IDC_MESH_SELECT:
         {
-            char filename[MAX_PATH] = {};
-            OPENFILENAMEA ofn = {};
-            ofn.lStructSize = sizeof(ofn);
-            ofn.hwndOwner = hdlg;
-            ofn.lpstrFilter = "Mesh Files (*.v3m;*.v3c;*.vfx)\0*.v3m;*.v3c;*.vfx\0All Files (*.*)\0*.*\0";
-            ofn.lpstrInitialDir = get_meshes_dir();
-            ofn.lpstrFile = filename;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-            if (GetOpenFileNameA(&ofn)) {
-                const char* base = strrchr(filename, '\\');
-                if (!base) base = strrchr(filename, '/');
-                if (base) base++; else base = filename;
-                SetDlgItemTextA(hdlg, IDC_MESH_FILENAME, base);
+            char current[MAX_PATH] = {};
+            char current_anim[MAX_PATH] = {};
+            GetDlgItemTextA(hdlg, IDC_MESH_FILENAME, current, sizeof(current));
+            GetDlgItemTextA(hdlg, IDC_MESH_STATE_ANIM, current_anim, sizeof(current_anim));
+            std::string chosen = current;
+            std::string chosen_anim = current_anim;
+            if (alpine_browse_mesh(hdlg, chosen, ALPINE_MESH_ANY, &chosen_anim)) {
+                SetDlgItemTextA(hdlg, IDC_MESH_FILENAME, chosen.c_str());
+                if (chosen_anim != current_anim) {
+                    SetDlgItemTextA(hdlg, IDC_MESH_STATE_ANIM, chosen_anim.c_str());
+                }
                 mesh_dialog_update_state(hdlg);
             }
             return TRUE;
@@ -931,42 +941,32 @@ static INT_PTR CALLBACK MeshDialogProc(HWND hdlg, UINT msg, WPARAM wparam, LPARA
             mesh_dialog_update_state(hdlg);
             return TRUE;
 
-        case IDC_MESH_CLUTTER_DEBRIS_BROWSE:
+        case IDC_MESH_CLUTTER_DEBRIS_SELECT:
         {
-            char filename[MAX_PATH] = {};
-            OPENFILENAMEA ofn = {};
-            ofn.lStructSize = sizeof(ofn);
-            ofn.hwndOwner = hdlg;
-            ofn.lpstrFilter = "Static Mesh (*.v3m)\0*.v3m\0All Files (*.*)\0*.*\0";
-            ofn.lpstrInitialDir = get_meshes_dir();
-            ofn.lpstrFile = filename;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-            if (GetOpenFileNameA(&ofn)) {
-                const char* base = strrchr(filename, '\\');
-                if (!base) base = strrchr(filename, '/');
-                if (base) base++; else base = filename;
-                SetDlgItemTextA(hdlg, IDC_MESH_CLUTTER_DEBRIS, base);
+            char current[MAX_PATH] = {};
+            GetDlgItemTextA(hdlg, IDC_MESH_CLUTTER_DEBRIS, current, sizeof(current));
+            std::string chosen = current;
+            // Debris is static geometry only, so this field takes no animation either.
+            if (alpine_browse_mesh(hdlg, chosen, ALPINE_MESH_V3M)) {
+                SetDlgItemTextA(hdlg, IDC_MESH_CLUTTER_DEBRIS, chosen.c_str());
             }
             return TRUE;
         }
 
-        case IDC_MESH_CLUTTER_CORPSE_BROWSE:
+        case IDC_MESH_CLUTTER_CORPSE_SELECT:
         {
-            char filename[MAX_PATH] = {};
-            OPENFILENAMEA ofn = {};
-            ofn.lStructSize = sizeof(ofn);
-            ofn.hwndOwner = hdlg;
-            ofn.lpstrFilter = "Mesh Files (*.v3m;*.v3c;*.vfx)\0*.v3m;*.v3c;*.vfx\0All Files (*.*)\0*.*\0";
-            ofn.lpstrInitialDir = get_meshes_dir();
-            ofn.lpstrFile = filename;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-            if (GetOpenFileNameA(&ofn)) {
-                const char* base = strrchr(filename, '\\');
-                if (!base) base = strrchr(filename, '/');
-                if (base) base++; else base = filename;
-                SetDlgItemTextA(hdlg, IDC_MESH_CLUTTER_CORPSE, base);
+            char current[MAX_PATH] = {};
+            GetDlgItemTextA(hdlg, IDC_MESH_CLUTTER_CORPSE, current, sizeof(current));
+            char current_anim[MAX_PATH] = {};
+            GetDlgItemTextA(hdlg, IDC_MESH_CLUTTER_CORPSE_STATE_ANIM, current_anim,
+                            sizeof(current_anim));
+            std::string chosen = current;
+            std::string chosen_anim = current_anim;
+            if (alpine_browse_mesh(hdlg, chosen, ALPINE_MESH_ANY, &chosen_anim)) {
+                SetDlgItemTextA(hdlg, IDC_MESH_CLUTTER_CORPSE, chosen.c_str());
+                if (chosen_anim != current_anim) {
+                    SetDlgItemTextA(hdlg, IDC_MESH_CLUTTER_CORPSE_STATE_ANIM, chosen_anim.c_str());
+                }
                 mesh_dialog_update_state(hdlg);
             }
             return TRUE;
@@ -1244,7 +1244,6 @@ void ShowMeshPropertiesDialog(DedMesh* mesh)
         if (auto* v = get_vmesh(mesh)) {
             g_v3c_action_cache.erase(v);
             g_v3c_action_simulating.erase(v);
-            g_v3c_action_elapsed.erase(v);
             vmesh_free(v);
             mesh->vmesh = nullptr;
         }
@@ -1256,7 +1255,6 @@ void ShowMeshPropertiesDialog(DedMesh* mesh)
         if (auto* v = get_vmesh(mesh)) {
             g_v3c_action_cache.erase(v);
             g_v3c_action_simulating.erase(v);
-            g_v3c_action_elapsed.erase(v);
             vmesh_free(v);
             mesh->vmesh = nullptr;
         }
@@ -1417,7 +1415,6 @@ void ShowMeshPropertiesForSelection(CDedLevel* level)
                 if (auto* v = get_vmesh(m)) {
                     g_v3c_action_cache.erase(v);
                     g_v3c_action_simulating.erase(v);
-                    g_v3c_action_elapsed.erase(v);
                     vmesh_free(v);
                     m->vmesh = nullptr;
                 }
@@ -1431,7 +1428,6 @@ void ShowMeshPropertiesForSelection(CDedLevel* level)
                 if (auto* v = get_vmesh(m)) {
                     g_v3c_action_cache.erase(v);
                     g_v3c_action_simulating.erase(v);
-                    g_v3c_action_elapsed.erase(v);
                     vmesh_free(v);
                     m->vmesh = nullptr;
                 }
@@ -1511,8 +1507,8 @@ void mesh_render(CDedLevel* level)
 
             EditorRenderParams render_params;
 
-            // Check if textures are enabled (DAT_006c9aa8)
-            if (*reinterpret_cast<int*>(0x006c9aa8) != 0) {
+            // Check if textures are enabled
+            if (editor_textures_enabled != 0) {
                 render_params.flags |= ERF_TEXTURED;
                 render_params.diffuse_color = {0xff, 0xff, 0xff, 0xff};
             }
@@ -1527,7 +1523,7 @@ void mesh_render(CDedLevel* level)
             auto vmesh_type = vmesh_get_type(vm);
             if (vmesh_type == VMESH_TYPE_ANIM_FX) {
                 vmesh_process(vm, frame_dt, 0, &mesh->pos, &mesh->orient, 1);
-                *reinterpret_cast<int*>(0x0059e21c) = 1;
+                vfx_render_transparent = 1;
             }
             else if (vmesh_type == VMESH_TYPE_CHARACTER) {
                 if (vm->instance) {
@@ -1545,18 +1541,13 @@ void mesh_render(CDedLevel* level)
                         }
 
                         if (mesh->simulate_in_editor) {
-                            // Simulate mode: advance animation each frame
-                            // Track elapsed time to detect when one-shot action expires
-                            auto& elapsed = g_v3c_action_elapsed[vm];
-                            elapsed += frame_dt;
-                            float duration = vmesh_get_action_duration(vm, it->second);
-                            if (duration > 0.0f && elapsed >= duration) {
-                                // One-shot action expired — restart for looping
-                                elapsed = 0.0f;
-                                vmesh_stop_all_actions(vm);
-                                vmesh_play_action_by_index(vm, it->second, 1.0f, 0);
-                            }
+                            // Simulate mode: advance animation each frame, stepping straight past
+                            // the loop seam so the clamped end frame is never the one drawn
                             vmesh_process(vm, frame_dt, 0, &mesh->pos, &mesh->orient, 1);
+                            if (mesh_v3c_action_finished(vm)) {
+                                mesh_play_v3c_action_looping(vm, it->second);
+                                vmesh_process(vm, frame_dt, 0, &mesh->pos, &mesh->orient, 1);
+                            }
                         }
                         // Freeze mode: don't call vmesh_process, pose stays at frame 0
                     }
@@ -1569,17 +1560,12 @@ void mesh_render(CDedLevel* level)
             vmesh_get_bound_sphere(vm, bound_center, &bound_radius);
 
             // Room visibility setup (required for mesh rendering)
-            using RoomSetupFn = int(__cdecl*)(int, const void*, float, int, int);
-            using RoomCleanupFn = void(__cdecl*)();
-            auto room_setup = reinterpret_cast<RoomSetupFn>(0x004885d0);
-            auto room_cleanup = reinterpret_cast<RoomCleanupFn>(0x00488bb0);
-
-            room_setup(0, &mesh->pos, bound_radius, 1, 1);
+            room_setup(nullptr, &mesh->pos, bound_radius, 1, 1);
             vmesh_render(vm, &mesh->pos, &mesh->orient, &render_params);
             room_cleanup();
 
             // Reset VFX transparency flag
-            *reinterpret_cast<int*>(0x0059e21c) = 0;
+            vfx_render_transparent = 0;
         }
 
         // Draw 3D cross at mesh position (cyan normal, red if selected)
@@ -1741,7 +1727,6 @@ void mesh_clear_clipboard()
         if (auto* v = get_vmesh(mesh)) {
             g_v3c_action_cache.erase(v);
             g_v3c_action_simulating.erase(v);
-            g_v3c_action_elapsed.erase(v);
             vmesh_free(v);
         }
         mesh->field_4.free();

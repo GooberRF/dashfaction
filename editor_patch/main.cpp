@@ -28,7 +28,9 @@
 #include <patch_common/CodeInjection.h>
 #include <crash_handler_stub.h>
 #include "../game_patch/rf/os/array.h"
+#include "alpine_color_picker.h"
 #include "exports.h"
+#include "file_dialogs.h"
 #include "resources.h"
 #include "mfc_types.h"
 #include "vtypes.h"
@@ -891,6 +893,36 @@ CodeInjection CColorDialog_ct_seed_current_color{
         }
     },
 };
+
+// CColorDialog::DoModal is the single choke point for every stock color site: its whole body is
+// PreModal, ChooseColorA on the embedded CHOOSECOLOR (this+0x5C), PostModal, return IDOK/IDCANCEL.
+int __fastcall CColorDialog_DoModal_new(void* this_);
+FunHook CColorDialog_DoModal_hook{
+    0x0052D46B,
+    CColorDialog_DoModal_new,
+};
+int __fastcall CColorDialog_DoModal_new(void* this_)
+{
+    auto& hwnd_owner = struct_field_ref<HWND>(this_, 0x60);
+    auto& rgb_result = struct_field_ref<COLORREF>(this_, 0x68);
+    auto* custom_colors = struct_field_ref<COLORREF*>(this_, 0x6C);
+
+    HWND parent = AddrCaller{0x0052F3A9}.this_call<HWND>(this_);
+    hwnd_owner = parent;
+    COLORREF color = rgb_result & 0xFFFFFF;
+    auto result = alpine_pick_color_ex(parent, color, custom_colors);
+    AddrCaller{0x0052F3E3}.this_call(this_);
+
+    switch (result) {
+        case AlpineColorPickerResult::ok:
+            rgb_result = color;
+            return IDOK;
+        case AlpineColorPickerResult::cancelled:
+            return IDCANCEL;
+        default:
+            return CColorDialog_DoModal_hook.call_target(this_);
+    }
+}
 
 static auto RedrawEditorAfterModification = addr_as_ref<int __cdecl()>(0x00483560);
 
@@ -2087,6 +2119,12 @@ extern "C" DWORD AF_DLL_EXPORT Init([[maybe_unused]] void* unused)
 
     // Open the color picker on the current color instead of black
     CColorDialog_ct_seed_current_color.install();
+
+    // Replace the stock ChooseColor dialog with the Alpine color picker at every editor color site
+    CColorDialog_DoModal_hook.install();
+
+    // Replace the stock common file dialogs with the modern shell ones
+    ApplyFileDialogPatches();
 
     // Headless "-bake <in.rfl> -bakeout <out.rfl>" lighting bake
     ApplyHeadlessBakePatches();

@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <commctrl.h>
+#include "alpine_color_picker.h"
 #include "level.h"
 #include "vtypes.h"
 #include "mfc_types.h"
@@ -972,20 +973,11 @@ static bool read_sun_color_text(HWND hdlg, uint8_t& r, uint8_t& g, uint8_t& b)
 
 static void pick_sun_color(HWND hdlg)
 {
-    // Every stock picker overwrites the array MFC's CColorDialog ctor installs (0x0052d497) with
-    // CMainFrame::custom_colors, so going through that field is what shares swatches with them.
-    static COLORREF fallback_custom_colors[16] = {};
-
-    CHOOSECOLORA cc = {};
-    cc.lStructSize = sizeof(cc);
-    cc.hwndOwner = hdlg;
-    cc.rgbResult = RGB(g_sun_color_r, g_sun_color_g, g_sun_color_b);
-    cc.lpCustColors = g_main_frame ? g_main_frame->custom_colors : fallback_custom_colors;
-    cc.Flags = CC_RGBINIT | CC_FULLOPEN;
-    if (ChooseColorA(&cc)) {
-        g_sun_color_r = GetRValue(cc.rgbResult);
-        g_sun_color_g = GetGValue(cc.rgbResult);
-        g_sun_color_b = GetBValue(cc.rgbResult);
+    COLORREF color = RGB(g_sun_color_r, g_sun_color_g, g_sun_color_b);
+    if (alpine_pick_color(hdlg, color, alpine_shared_custom_colors())) {
+        g_sun_color_r = GetRValue(color);
+        g_sun_color_g = GetGValue(color);
+        g_sun_color_b = GetBValue(color);
         update_sun_color_controls(hdlg);
     }
 }

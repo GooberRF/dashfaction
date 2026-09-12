@@ -8,6 +8,7 @@
 #include <vector>
 #include <cmath>
 #include <xlog/xlog.h>
+#include "alpine_color_picker.h"
 #include "corona.h"
 #include "level.h"
 #include "resources.h"
@@ -236,20 +237,14 @@ static INT_PTR CALLBACK CoronaDialogProc(HWND hdlg, UINT msg, WPARAM wp, LPARAM 
             }
             break;
         case IDC_CORONA_COLOR_CHANGE: {
-            CHOOSECOLORA cc = {};
-            static COLORREF custom_colors[16] = {};
-            cc.lStructSize = sizeof(cc);
-            cc.hwndOwner = hdlg;
-            cc.rgbResult = RGB(
-                GetDlgItemInt(hdlg, IDC_CORONA_COLOR_R, nullptr, FALSE),
-                GetDlgItemInt(hdlg, IDC_CORONA_COLOR_G, nullptr, FALSE),
-                GetDlgItemInt(hdlg, IDC_CORONA_COLOR_B, nullptr, FALSE));
-            cc.lpCustColors = custom_colors;
-            cc.Flags = CC_RGBINIT | CC_FULLOPEN;
-            if (ChooseColorA(&cc)) {
-                SetDlgItemInt(hdlg, IDC_CORONA_COLOR_R, GetRValue(cc.rgbResult), FALSE);
-                SetDlgItemInt(hdlg, IDC_CORONA_COLOR_G, GetGValue(cc.rgbResult), FALSE);
-                SetDlgItemInt(hdlg, IDC_CORONA_COLOR_B, GetBValue(cc.rgbResult), FALSE);
+            COLORREF color = RGB(
+                std::min(GetDlgItemInt(hdlg, IDC_CORONA_COLOR_R, nullptr, FALSE), 255u),
+                std::min(GetDlgItemInt(hdlg, IDC_CORONA_COLOR_G, nullptr, FALSE), 255u),
+                std::min(GetDlgItemInt(hdlg, IDC_CORONA_COLOR_B, nullptr, FALSE), 255u));
+            if (alpine_pick_color(hdlg, color, alpine_shared_custom_colors())) {
+                SetDlgItemInt(hdlg, IDC_CORONA_COLOR_R, GetRValue(color), FALSE);
+                SetDlgItemInt(hdlg, IDC_CORONA_COLOR_G, GetGValue(color), FALSE);
+                SetDlgItemInt(hdlg, IDC_CORONA_COLOR_B, GetBValue(color), FALSE);
             }
             return TRUE;
         }

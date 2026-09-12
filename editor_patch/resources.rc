@@ -407,9 +407,9 @@ FONT 8, "MS Sans Serif", 0, 0, 0
 
     LTEXT           "Mesh File:", -1, 7, 31, 44, 8
     EDITTEXT        IDC_MESH_FILENAME, 60, 29, 150, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "Browse...", IDC_MESH_BROWSE, 215, 29, 50, 14
+    PUSHBUTTON      "Select", IDC_MESH_SELECT, 215, 29, 50, 14
 
-    LTEXT           "", IDC_MESH_TYPE_LABEL, 60, 46, 200, 8
+    LTEXT           "", IDC_MESH_TYPE_LABEL, 60, 48, 150, 8
 
     LTEXT           "State Anim:", -1, 7, 61, 44, 8
     EDITTEXT        IDC_MESH_STATE_ANIM, 60, 59, 140, 14, ES_AUTOHSCROLL
@@ -438,7 +438,7 @@ FONT 8, "MS Sans Serif", 0, 0, 0
     // Left column: destructible mesh options
     LTEXT           "Debris Mesh:", -1, 14, 238, 46, 8
     EDITTEXT        IDC_MESH_CLUTTER_DEBRIS, 14, 248, 118, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "...", IDC_MESH_CLUTTER_DEBRIS_BROWSE, 134, 248, 14, 14
+    PUSHBUTTON      "...", IDC_MESH_CLUTTER_DEBRIS_SELECT, 134, 248, 14, 14
     LTEXT           "Debris Vel:", -1, 14, 266, 40, 8
     EDITTEXT        IDC_MESH_CLUTTER_DEBRIS_VEL, 54, 264, 36, 14, ES_AUTOHSCROLL
 
@@ -449,7 +449,7 @@ FONT 8, "MS Sans Serif", 0, 0, 0
 
     LTEXT           "Corpse Mesh:", -1, 14, 326, 46, 8
     EDITTEXT        IDC_MESH_CLUTTER_CORPSE, 14, 336, 118, 14, ES_AUTOHSCROLL
-    PUSHBUTTON      "...", IDC_MESH_CLUTTER_CORPSE_BROWSE, 134, 336, 14, 14
+    PUSHBUTTON      "...", IDC_MESH_CLUTTER_CORPSE_SELECT, 134, 336, 14, 14
     LTEXT           "", IDC_MESH_CLUTTER_CORPSE_TYPE_LABEL, 14, 352, 134, 8
     LTEXT           "Corpse Anim:", -1, 14, 364, 46, 8
     EDITTEXT        IDC_MESH_CLUTTER_CORPSE_STATE_ANIM, 62, 362, 86, 14, ES_AUTOHSCROLL
@@ -944,6 +944,81 @@ FONT 8, "MS Sans Serif"
     AUTORADIOBUTTON "By name", IDC_TYPE_FILTER_SORT_NAME, 40, 341, 48, 10, WS_GROUP
     AUTORADIOBUTTON "By UID", IDC_TYPE_FILTER_SORT_UID, 90, 341, 42, 10
     AUTOCHECKBOX    "Group by type", IDC_TYPE_FILTER_GROUP_TYPE, 140, 341, 72, 10, WS_GROUP
+}
+
+// Alpine color picker (replaces the stock ChooseColor dialog at every editor color site)
+LANGUAGE LANG_ENGLISH, SUBLANG_DEFAULT
+IDD_ALPINE_COLOR_PICKER DIALOGEX 0, 0, 268, 250
+STYLE DS_MODALFRAME | DS_SETFONT | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "Select Color"
+FONT 8, "MS Sans Serif"
+{
+    CONTROL         "", IDC_COLORPICK_SV_FIELD, "Static", SS_NOTIFY | WS_BORDER, 7, 7, 130, 120
+    CONTROL         "", IDC_COLORPICK_HUE_BAR, "Static", SS_NOTIFY | WS_BORDER, 142, 7, 14, 120
+
+    CONTROL         "", IDC_COLORPICK_COMPARE, "Static", SS_NOTIFY | WS_BORDER, 166, 7, 95, 26
+    LTEXT           "Current", -1, 166, 36, 30, 8
+    RTEXT           "New", -1, 231, 36, 30, 8
+
+    LTEXT           "R:", -1, 166, 50, 10, 8
+    EDITTEXT        IDC_COLORPICK_RED, 178, 48, 26, 12, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "G:", -1, 166, 66, 10, 8
+    EDITTEXT        IDC_COLORPICK_GREEN, 178, 64, 26, 12, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "B:", -1, 166, 82, 10, 8
+    EDITTEXT        IDC_COLORPICK_BLUE, 178, 80, 26, 12, ES_NUMBER | ES_AUTOHSCROLL
+
+    LTEXT           "Hex:", -1, 210, 50, 20, 8
+    EDITTEXT        IDC_COLORPICK_HEX, 210, 62, 51, 12, ES_UPPERCASE | ES_AUTOHSCROLL
+
+    PUSHBUTTON      "Screen Pick", IDC_COLORPICK_EYEDROPPER, 210, 80, 51, 14
+
+    CONTROL         "", IDC_COLORPICK_SAMPLE, "Static", WS_BORDER, 166, 100, 16, 12
+    LTEXT           "", IDC_COLORPICK_SAMPLE_INFO, 187, 102, 74, 8
+
+    LTEXT           "Presets:", IDC_COLORPICK_PRESETS_LABEL, 7, 132, 30, 8
+    CONTROL         "", IDC_COLORPICK_PRESETS, "Static", SS_NOTIFY | WS_BORDER, 7, 143, 254, 36
+
+    LTEXT           "Custom:", IDC_COLORPICK_PALETTE_LABEL, 7, 184, 30, 8
+    CONTROL         "", IDC_COLORPICK_PALETTE, "Static", SS_NOTIFY | WS_BORDER, 7, 195, 254, 14
+    LTEXT           "Left-click a swatch to use it. Right-click a custom swatch to store.", IDC_COLORPICK_HINT, 7, 213, 254, 8
+
+    DEFPUSHBUTTON   "OK", IDOK, 156, 229, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 211, 229, 50, 14
+}
+
+// Alpine Mesh Browser dialog
+LANGUAGE LANG_ENGLISH, SUBLANG_DEFAULT
+IDD_ALPINE_MESH_BROWSER DIALOGEX 0, 0, 460, 288
+STYLE DS_MODALFRAME | DS_SETFONT | DS_CENTER | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
+CAPTION "Select Mesh"
+FONT 8, "MS Sans Serif"
+{
+    LTEXT           "Filter:", -1, 7, 9, 22, 8
+    EDITTEXT        IDC_MESH_BROWSER_FILTER, 31, 7, 221, 12, ES_AUTOHSCROLL
+
+    LTEXT           "Background:", -1, 258, 9, 42, 8
+    AUTORADIOBUTTON "Editor", IDC_MESH_BROWSER_BG_EDITOR, 304, 8, 40, 10, WS_GROUP | WS_TABSTOP
+    AUTORADIOBUTTON "White", IDC_MESH_BROWSER_BG_WHITE, 348, 8, 40, 10
+    AUTORADIOBUTTON "Black", IDC_MESH_BROWSER_BG_BLACK, 392, 8, 40, 10
+
+    // Laid out split; the dialog grows the mesh tree over the animation pane whenever the
+    // animation pane is hidden.
+    CONTROL         "", IDC_MESH_BROWSER_TREE, WC_TREEVIEW, WS_BORDER | WS_TABSTOP | WS_VSCROLL | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS, 7, 24, 245, 112
+    LTEXT           "Animations:", IDC_MESH_BROWSER_ANIM_LABEL, 7, 140, 44, 8
+    CONTROL         "", IDC_MESH_BROWSER_ANIM_TREE, WC_TREEVIEW, WS_BORDER | WS_TABSTOP | WS_VSCROLL | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS, 7, 150, 245, 102
+
+    // SS_NOTIFY makes the static return HTCLIENT from WM_NCHITTEST; without it the default
+    // static proc returns HTTRANSPARENT and every mouse button message goes to the dialog.
+    CONTROL         "", IDC_MESH_BROWSER_PREVIEW, "Static", SS_OWNERDRAW | SS_NOTIFY | WS_BORDER, 258, 24, 195, 152
+    LTEXT           "", IDC_MESH_BROWSER_NAME, 258, 182, 195, 8
+    LTEXT           "", IDC_MESH_BROWSER_TYPE, 258, 192, 195, 8
+    LTEXT           "", IDC_MESH_BROWSER_SOURCE, 258, 202, 195, 8
+    LTEXT           "", IDC_MESH_BROWSER_ANIM, 258, 212, 195, 8
+    LTEXT           "", IDC_MESH_BROWSER_STATUS, 258, 226, 195, 8
+
+    LTEXT           "", IDC_MESH_BROWSER_COUNT, 7, 268, 250, 8, WS_GROUP
+    DEFPUSHBUTTON   "OK", IDOK, 339, 264, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 394, 264, 50, 14
 }
 
 // VERSIONINFO
