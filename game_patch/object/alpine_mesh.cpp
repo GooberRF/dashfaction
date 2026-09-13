@@ -477,7 +477,7 @@ static bool vmesh_play_v3c_action_by_name(rf::VMesh* vmesh, const char* action_n
         return false;
     }
 
-    // Play the loaded action (transition_time must be > 0 or play_action is a no-op)
+    // Play the loaded action (weight must be > 0 or play_action is a no-op)
     rf::vmesh_play_action_by_index(vmesh, action_index, 0.001f, 0);
     return true;
 }
