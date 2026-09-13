@@ -31,20 +31,14 @@ constexpr float preview_fov = 60.0f;
 constexpr float preview_spin_per_tick = 0.9f;
 constexpr float preview_zoom_min = 0.15f;
 constexpr float preview_zoom_max = 24.0f;
-// The camera basis is built straight from the angles, so the only reason to clamp is to keep the
-// pitch away from the poles where yaw stops being meaningful.
 constexpr float preview_pitch_limit = 89.0f;
 constexpr float pi = 3.14159265f;
 // Packfile directory records store the name in a fixed 60 byte field.
 constexpr std::size_t packfile_name_max = 60;
-// character_mesh_load_action (0x004C2150) appends to the character's action array with no bounds
-// check and nothing short of a re-init removes an entry, so new appends stop well short of its
-// (0x120C - 0xF5C) / 4 = 172 entries, leaving room for the editor's own state animation loads.
 constexpr int preview_max_actions = 96;
+constexpr int preview_owned_max_actions = 160;
 static_assert(preview_max_actions < editor_character_max_actions);
-// The skeleton a name resolves to is claimed out of a table nothing releases while the editor runs,
-// and 0x004FFF90 writes through a null slot pointer once every entry is taken, so a load that would
-// claim one stops short of the end.
+static_assert(preview_owned_max_actions < editor_character_max_actions);
 constexpr unsigned preview_max_anim_skeletons = 790;
 static_assert(preview_max_anim_skeletons < editor_max_anim_skeletons);
 // 0x004FFF90 copies both the name it is given and each name already in the table into 60 byte stack
@@ -52,13 +46,12 @@ static_assert(preview_max_anim_skeletons < editor_max_anim_skeletons);
 constexpr std::size_t anim_name_max = 59;
 // An .rfa stores no bone names, only a per bone table indexed by the character's own bone index.
 // 0x005002DB reads that table without a bounds check, so an animation with fewer bones than the
-// character walks off it into keyframe data and dereferences the result. The bone count is both
-// the compatibility predicate and the crash predicate.
+// character walks off it into keyframe data and dereferences the result.
 constexpr std::uint32_t rfa_signature = 0x46564D56; // "VMVF"
 constexpr int rfa_max_bones = 50;
 constexpr std::size_t rfa_header_size = 0x50;
-// Ceiling on how much of an animation is read for validation. The largest stock .rfa is under
-// 600 KB; the cap is here so a file that claims to be enormous cannot ask for the allocation.
+// Ceiling guard on how much of an animation is read for validation. This is larger than any
+// animation is realistically going to ever be.
 constexpr std::size_t rfa_read_max = 16u * 1024 * 1024;
 
 struct BrowserSource
@@ -801,6 +794,22 @@ EditorVMesh* preview_load_vmesh(BrowserState& st, const std::string& name)
     return vmesh;
 }
 
+// Nothing removes an entry from a character's action list, so browsing distinct animations on one
+// mesh eventually fills it.
+bool preview_recycle_character(BrowserState& st)
+{
+    if (!st.owned_character || st.selected.empty()) {
+        return false;
+    }
+    preview_free(st);
+    st.vmesh = preview_load_vmesh(st, st.selected);
+    st.load_failed = (st.vmesh == nullptr);
+    // The caller carries on against the reloaded character, so it has to be as usable as the one
+    // the entry check accepted.
+    return st.vmesh && st.vmesh->mesh && st.vmesh->instance &&
+           vmesh_get_type(st.vmesh) == VMESH_TYPE_CHARACTER;
+}
+
 // character_mesh_load_action keys its dedup on the skeleton a name resolves to, so an action the
 // character already carries is recognised the way the engine recognises it: through the same name
 // keyed table 0x004FFF90 searches, with the extension stripped from both sides.
@@ -854,37 +863,60 @@ bool character_carries_action(const EditorCharacter* character, const void* skel
     return false;
 }
 
-int preview_load_action(BrowserState& st, const std::string& anim_name)
+enum ActionLoadResult
 {
+    action_loaded,
+    action_incompatible, // the file cannot be played on this mesh
+    action_no_room,      // the mesh has no room for another animation
+};
+
+ActionLoadResult preview_load_action(BrowserState& st, const std::string& anim_name, int& index_out)
+{
+    index_out = -1;
     if (!st.vmesh || vmesh_get_type(st.vmesh) != VMESH_TYPE_CHARACTER || !st.vmesh->mesh ||
         !st.vmesh->instance) {
-        return -1;
+        return action_incompatible;
     }
     if (!anim_name_fits(anim_name)) {
-        return -1;
+        return action_incompatible;
     }
     const std::string file = anim_load_name(anim_name);
     auto& validated = g_validated_actions[string_to_lower(st.selected)];
     const std::string file_key = string_to_lower(file);
     if (validated.find(file_key) == validated.end()) {
+        // The verdict is about the two files and survives a recycle, which changes neither.
         if (!rfa_is_playable(file, character_limits(st.vmesh))) {
-            return -1;
+            return action_incompatible;
         }
         validated.insert(file_key);
     }
     // An action the character already carries appends nothing and claims no skeleton, so both
-    // ceilings bind only on a load that would grow something.
-    const auto* character = static_cast<const EditorCharacter*>(st.vmesh->mesh);
-    const void* skeleton = find_anim_skeleton(file);
-    if (!skeleton && anim_skeletons_in_use() >= preview_max_anim_skeletons) {
-        return -1;
+    // ceilings bind only on a load that would grow something. The second pass runs on the character
+    // a recycle brought in, whose list and skeletons are both fresh.
+    for (int pass = 0; pass < 2; ++pass) {
+        const auto* character = static_cast<const EditorCharacter*>(st.vmesh->mesh);
+        const void* skeleton = find_anim_skeleton(file);
+        if (!character_carries_action(character, skeleton, 0)) {
+            if (!skeleton && anim_skeletons_in_use() >= preview_max_anim_skeletons) {
+                return action_no_room;
+            }
+            const int ceiling =
+                st.owned_character ? preview_owned_max_actions : preview_max_actions;
+            if (character->num_actions >= ceiling) {
+                if (pass == 0 && preview_recycle_character(st)) {
+                    continue;
+                }
+                return action_no_room;
+            }
+        }
+        const int index = character_mesh_load_action(st.vmesh->mesh, file.c_str(), 0, 0);
+        if (index < 0) {
+            return action_incompatible;
+        }
+        index_out = index;
+        return action_loaded;
     }
-    if (character->num_actions >= preview_max_actions &&
-        !character_carries_action(character, skeleton, 0)) {
-        return -1;
-    }
-    const int index = character_mesh_load_action(st.vmesh->mesh, file.c_str(), 0, 0);
-    return (index >= 0) ? index : -1;
+    return action_no_room;
 }
 
 void preview_play_anim(HWND hdlg, BrowserState& st, const std::string& anim_name)
@@ -894,8 +926,11 @@ void preview_play_anim(HWND hdlg, BrowserState& st, const std::string& anim_name
     // just recorded and replayed once a .v3c is previewed.
     if (st.vmesh && vmesh_get_type(st.vmesh) == VMESH_TYPE_CHARACTER) {
         vmesh_stop_all_actions(st.vmesh);
+        ActionLoadResult result = action_loaded;
         if (!anim_name.empty()) {
-            st.anim_index = preview_load_action(st, anim_name);
+            int index = -1;
+            result = preview_load_action(st, anim_name, index);
+            st.anim_index = index;
         }
         if (st.anim_index >= 0) {
             mesh_play_v3c_action_looping(st.vmesh, st.anim_index);
@@ -904,8 +939,15 @@ void preview_play_anim(HWND hdlg, BrowserState& st, const std::string& anim_name
         }
         else if (!anim_name.empty()) {
             st.anim_chosen = false;
-            SetDlgItemTextA(hdlg, IDC_MESH_BROWSER_STATUS,
-                            "Animation is not compatible with this mesh");
+            const char* status = "Animation is not compatible with this mesh";
+            if (st.load_failed) {
+                status = "Preview unavailable (mesh failed to load)";
+            }
+            else if (result == action_no_room) {
+                status = "Animation limit reached for this mesh";
+                xlog::warn("Mesh browser: '{}' carries as many animations as it can hold; nothing releases them before the editor exits", st.selected);
+            }
+            SetDlgItemTextA(hdlg, IDC_MESH_BROWSER_STATUS, status);
         }
     }
     SetDlgItemTextA(hdlg, IDC_MESH_BROWSER_ANIM,

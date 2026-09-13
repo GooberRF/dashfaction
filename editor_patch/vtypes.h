@@ -691,6 +691,17 @@ struct EditorVfsFile
 static_assert(sizeof(EditorVfsFile) == 0xC);
 static auto& vfs_file_buckets = addr_as_ref<EditorVfsFile*[0x8000]>(0x01622004);
 
+// Builds the path a search path slot resolves a name to: the root directory 0x0158CA10, which
+// always carries its own trailing separator, then the slot's path, a separator and the name. A
+// null name yields the directory itself; stock callers hand it a 1024 byte buffer.
+static auto& file_make_path =
+    addr_as_ref<char* __cdecl(int path_index, const char* name, char* out)>(0x004C33D0);
+
+// Adds a loose file to the hash unless a node for that name is already there.
+// The name has to be lowercased.
+static auto& file_add_loose_file =
+    addr_as_ref<void __cdecl(const char* name, int path_index)>(0x004CF8D0);
+
 // One .vpp directory entry. Names come from a 60 byte fixed record, so they are not
 // guaranteed to be null terminated.
 struct EditorPackfileEntry

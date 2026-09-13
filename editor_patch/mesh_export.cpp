@@ -531,9 +531,6 @@ static INT_PTR CALLBACK ConvertOptionsDlgProc(HWND hdlg, UINT msg, WPARAM wParam
 static bool create_mesh_object_at(CDedLevel* level, const char* mesh_filename,
                                   const Vector3& pos)
 {
-    // Reload VFS paths so the editor can find the newly exported file
-    reload_custom_meshes();
-
     // Verify the mesh can be loaded before creating the object
     EditorVMesh* loaded_vmesh = vmesh_load_v3m(mesh_filename, 1, -1);
     if (!loaded_vmesh) {
@@ -737,6 +734,9 @@ void handle_brush_convert()
         show_error_message("Failed to write V3M file.");
         return;
     }
+
+    // Register the written file so it can be selected in the mesh browser.
+    register_written_file(filename);
 
     int total_tris = 0;
     for (auto& sm : submeshes)
