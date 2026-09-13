@@ -946,7 +946,7 @@ FONT 8, "MS Sans Serif"
     AUTOCHECKBOX    "Group by type", IDC_TYPE_FILTER_GROUP_TYPE, 140, 341, 72, 10, WS_GROUP
 }
 
-// Alpine color picker (replaces the stock ChooseColor dialog at every editor color site)
+// Alpine color picker
 LANGUAGE LANG_ENGLISH, SUBLANG_DEFAULT
 IDD_ALPINE_COLOR_PICKER DIALOGEX 0, 0, 268, 250
 STYLE DS_MODALFRAME | DS_SETFONT | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
@@ -1002,7 +1002,7 @@ FONT 8, "MS Sans Serif"
     AUTORADIOBUTTON "Black", IDC_MESH_BROWSER_BG_BLACK, 392, 8, 40, 10
 
     // Laid out split; the dialog grows the mesh tree over the animation pane whenever the
-    // animation pane is hidden. WS_GROUP closes the background radio group.
+    // animation pane is hidden.
     CONTROL         "", IDC_MESH_BROWSER_TREE, WC_TREEVIEW, WS_GROUP | WS_BORDER | WS_TABSTOP | WS_VSCROLL | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS, 7, 24, 245, 112
     LTEXT           "Animations:", IDC_MESH_BROWSER_ANIM_LABEL, 7, 140, 44, 8
     CONTROL         "", IDC_MESH_BROWSER_ANIM_TREE, WC_TREEVIEW, WS_BORDER | WS_TABSTOP | WS_VSCROLL | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS, 7, 150, 245, 102

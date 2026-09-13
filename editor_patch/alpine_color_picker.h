@@ -26,7 +26,7 @@ inline int alpine_color_round_u8(double value)
 }
 
 // h in [0, 360), s and v in [0, 1]. Paired with alpine_hsv_to_rgb this round-trips every
-// COLORREF byte-exactly, which is what keeps the RGB/hex fields from drifting while dragging.
+// COLORREF byte-exactly and keeps the RGB/hex fields from drifting while dragging.
 inline void alpine_rgb_to_hsv(COLORREF color, double& h, double& s, double& v)
 {
     const int r = GetRValue(color);

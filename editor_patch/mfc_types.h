@@ -12,7 +12,7 @@
 extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 // Alpine's dialog templates carry no DS_CENTER, so a modal opens at its owner's top left unless it
-// is placed in WM_INITDIALOG. Kept inside the owner's monitor work area.
+// is placed in WM_INITDIALOG.
 inline void alpine_center_dialog_on_owner(HWND hdlg)
 {
     HWND owner = GetWindow(hdlg, GW_OWNER);

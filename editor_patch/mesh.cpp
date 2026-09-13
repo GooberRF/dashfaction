@@ -107,9 +107,6 @@ EditorVMesh* mesh_load_vmesh_file(const char* filename)
     else if (string_iequals(ext, "v3c") || string_iequals(ext, "vfx")) {
         // Both v3c and vfx loaders can trigger fatal errors if the file is missing.
         // Use RED's File class to check if the file exists (searches loose files + .vpp archives).
-        // open (0x004CF9A0) only locates the file, it never opens a stream and leaves
-        // open_file_index at the constructor's -1, so there is nothing to close: close
-        // (0x004CFF60) would index the open file table at slot -1 and fclose whatever it finds.
         rf::File file;
         if (file.open(filename)) {
             if (string_iequals(ext, "v3c")) {

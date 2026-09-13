@@ -36,6 +36,11 @@ Version 1.5.0 (TBD): Not yet released
 - Add `High-resolution lightmaps` level property, used in lightmap bake in level editor
 - Deprecate and remove `-smoothlights` level editor switch
 - Add `dbg_collision_pairs` console command to print object collision pair pool statistics
+- Use the modern Windows file dialogs for every open and save in the level editor
+- Always render meshes at their highest LOD in the level editor
+- Make a mesh exported from a brush in the level editor immediately usable as a `Mesh` object
+- Add a mesh browser to the level editor for picking meshes and animations for `Mesh` objects
+- Add a new and modern color picker to the level editor
 
 [@nickalreadyinuse](https://github.com/nickalreadyinuse)
 - Add `ui_color_console` console command to set the console background color
@@ -56,6 +61,11 @@ Version 1.5.0 (TBD): Not yet released
   - Fix several accuracy issues on face edges that resulted in dark bands and splotches along polygon boundaries
   - Blend coplanar surfaces across room boundaries
 - Fix object collision pairs silently running out on levels with many collidable clutter objects, triggers, and items when many players are connected
+- Fix level editor crashing when a mesh is played with an animation that does not fit its skeleton
+- Fix level editor crashing when a Direct3D buffer lock fails
+- Fix level editor crashing when a Weather Region's snow `Bitmap` names a loose file instead of one inside a packfile
+- Fix a one frame flash to the default pose each time an animation loops on a mesh being simulated in the level editor
+- Update Weather Region bounds in viewport live when values are changed
 
 [@is-this-c](https://github.com/is-this-c)
 - Let `Caps Lock` capitalize

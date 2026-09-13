@@ -15,11 +15,6 @@
 
 HWND GetMainFrameHandle();
 
-// Draw every mesh at LOD0. 0x00507890 is RED's only LOD picker (the single caller of 0x004C5DC0)
-// and feeds both the v3m and the v3c submit, so two branch swaps cover everything: 0x00507907 skips
-// the ERF 0x1|0x8 lowest-LOD force and 0x00507915 skips the distance walk, leaving EBP at the 0 the
-// preceding XOR put there. 0x01abc058 looks like the same lever but also switches the key light to
-// a fixed world vector, so it is left alone.
 bool g_editor_force_lod0 = true;
 
 // After geometry rebuild, rooms allocated from recycled heap memory may have stale
@@ -84,32 +79,21 @@ namespace red
 
 }
 
-// Six places lock the one global dynamic vertex buffer (four of them the index buffer too) and
-// every one of them throws the Lock HRESULT away: gr_d3d_prepare_buffers marks the buffers locked
-// regardless, and the room/v3d submit paths keep the returned pointer in a local. A failed Lock
-// therefore leaves a null pointer that the vertex stores index from — gr_d3d_poly's first store
-// lands at address 8, and FUN_00505c60 faulted writing the 40-byte vertex's color byte at 0x17
-// (null + 0x12 + 5) in the 2026-09-12 dump, where the vertex Lock failed while the index Lock
-// succeeded. Substitute scratch for whichever side failed: the batch lands in our own memory, the
-// draw shows stale buffer contents, and the editor survives until the device recovers.
-//
-// Scratch covers the largest span any consumer can write: the loops are bounded by the u16 section
-// vertex/face counts (40 bytes per vertex, three 16-bit indices per face) plus the 0x300 entries of
-// slack the clipping pass is allowed to append, and Lock returns a pointer to the start of the
-// locked range, so those counts alone bound the span.
+// All six sites that lock the global dynamic vertex/index buffers discard the Lock HRESULT and
+// write through the returned pointer, so a failed Lock crashes on a null store. Substitute scratch
+// for whichever side failed: the batch lands in our own memory and the editor survives until the
+// device recovers. Scratch is sized for the largest possible write: u16 section vertex/face counts
+// (40 bytes per vertex, three u16 indices per face) plus the clipping pass's 0x300-entry slack.
 static constexpr int lock_clip_slack = 0x300;
 static constexpr int max_lock_verts = 0x10000 + lock_clip_slack;
 static constexpr int max_lock_indices = 0x10000 * 3 + lock_clip_slack;
 alignas(16) static u8 lock_vert_scratch[max_lock_verts * 40];
 static u8 lock_index_scratch[max_lock_indices * 2];
 
-// Only gr_d3d_prepare_buffers (which runs for every 2D, line and UI batch) has a hook site where
-// the HRESULT is still in a register, so record the most recent one there: it names the failure
-// class — device lost, out of video memory, or invalid call — which nothing else here can tell.
+// Only gr_d3d_prepare_buffers has a hook site where the HRESULT is still in a register.
 static int last_vertex_lock_hr;
 
-// Pointers are passed by address because half the sites keep them in a stack local. A single
-// warning covers the whole class: the buffers are global, so once one Lock fails they all do.
+// Pointers are passed by address because half the sites keep them in a stack local.
 static void substitute_failed_locks(u8** vertex_data, u8** index_data, const char* site)
 {
     if (vertex_data && !*vertex_data) {
@@ -119,7 +103,7 @@ static void substitute_failed_locks(u8** vertex_data, u8** index_data, const cha
     }
     if (index_data && !*index_data) {
         WARN_ONCE("Index buffer lock failed in {}, discarding geometry until the device recovers",
-                  site);
+            site);
         *index_data = lock_index_scratch;
     }
 }

@@ -296,9 +296,7 @@ int lod_morph_capacity(const EditorVifMesh* mesh)
     return 0;
 }
 
-// Morph apply only ever runs on LOD0: 0x00506830 skips its whole morph block when the rendered LOD
-// index (arg 6) is non-zero, so 0x00507C90 always hands 0x00500720 LOD0's orig_map and
-// num_original_vecs. RF.exe carries the same gate byte for byte at 0x0052EBEB.
+// Morph apply only ever runs on LOD0.
 CharacterLimits character_limits(EditorVMesh* vmesh)
 {
     CharacterLimits limits{};
@@ -329,8 +327,6 @@ CharacterLimits character_limits(EditorVMesh* vmesh)
     return limits;
 }
 
-// The engine loads an .rfa verbatim (0x00500D30) and trusts every offset in it, so everything the
-// playback path reads has to be proven in range before the file is handed to the loader.
 bool rfa_is_playable(const std::string& file, const CharacterLimits& limits)
 {
     // The pose path indexes an animation's per bone table with the character's own bone index and
@@ -770,9 +766,7 @@ void preview_free(BrowserState& st)
 // A .v3c's base character stays in a table of 64 slots that nothing frees before the editor's own
 // atexit handler runs, so browsing characters ends in the fatal "No more base character room" at
 // the 64th distinct one. Take ownership of the slot this load brings in and release it on the next
-// swap; one that was already resident belongs to whatever loaded it. Which slots appeared, not the
-// name, decides that, so it does not depend on how the loader spells the name, and the dialog is
-// modal so nothing else can have claimed one in between.
+// swap; one that was already resident belongs to whatever loaded it.
 EditorVMesh* preview_load_vmesh(BrowserState& st, const std::string& name)
 {
     const std::uint64_t before = editor_base_characters_in_use();

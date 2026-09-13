@@ -1,9 +1,11 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <algorithm>
 #include <vector>
@@ -218,6 +220,43 @@ void weather_region_deserialize_chunk(CDedLevel& level, rf::File& file, std::siz
 // ─── Properties Dialog ──────────────────────────────────────────────────────
 
 static std::vector<DedWeatherRegion*> g_selected_weather_regions;
+
+struct WeatherRegionDimsPreview
+{
+    bool active = false;
+    WeatherRegionShape shape = WeatherRegionShape::box;
+    std::optional<float> width, height, depth, radius;
+};
+static WeatherRegionDimsPreview g_dims_preview;
+
+static std::optional<float> weather_region_get_dim_input(HWND hdlg, int idc)
+{
+    char buf[32] = {};
+    GetDlgItemTextA(hdlg, idc, buf, sizeof(buf));
+    for (const char* p = buf; *p != '\0'; p++) {
+        if (!isspace(static_cast<unsigned char>(*p))) {
+            return static_cast<float>(atof(buf));
+        }
+    }
+    return std::nullopt;
+}
+
+static void weather_region_capture_dims_preview(HWND hdlg)
+{
+    int shape_sel = static_cast<int>(SendDlgItemMessage(hdlg, IDC_WEATHER_SHAPE, CB_GETCURSEL, 0, 0));
+    g_dims_preview.shape = static_cast<WeatherRegionShape>(shape_sel < 0 ? 0 : shape_sel);
+    g_dims_preview.width = weather_region_get_dim_input(hdlg, IDC_WEATHER_WIDTH);
+    g_dims_preview.height = weather_region_get_dim_input(hdlg, IDC_WEATHER_HEIGHT);
+    g_dims_preview.depth = weather_region_get_dim_input(hdlg, IDC_WEATHER_DEPTH);
+    g_dims_preview.radius = weather_region_get_dim_input(hdlg, IDC_WEATHER_RADIUS);
+}
+
+static void weather_region_refresh_dims_preview(HWND hdlg)
+{
+    if (!g_dims_preview.active) return;
+    weather_region_capture_dims_preview(hdlg);
+    redraw_all_viewports();
+}
 
 // Bitmap currently shown in the snow bitmap preview, tracked so an edit-box keystroke only
 // touches the bitmap manager when the name actually changed.
@@ -483,6 +522,9 @@ static INT_PTR CALLBACK WeatherRegionDialogProc(HWND hdlg, UINT msg, WPARAM wp, 
         weather_region_update_type_fields(hdlg);
         weather_region_update_bitmap_preview(hdlg, true);
 
+        weather_region_capture_dims_preview(hdlg);
+        g_dims_preview.active = true;
+
         return TRUE;
     }
     case WM_COMMAND:
@@ -490,6 +532,15 @@ static INT_PTR CALLBACK WeatherRegionDialogProc(HWND hdlg, UINT msg, WPARAM wp, 
         case IDC_WEATHER_SHAPE:
             if (HIWORD(wp) == CBN_SELCHANGE) {
                 weather_region_update_shape_fields(hdlg);
+                weather_region_refresh_dims_preview(hdlg);
+            }
+            break;
+        case IDC_WEATHER_WIDTH:
+        case IDC_WEATHER_HEIGHT:
+        case IDC_WEATHER_DEPTH:
+        case IDC_WEATHER_RADIUS:
+            if (HIWORD(wp) == EN_CHANGE) {
+                weather_region_refresh_dims_preview(hdlg);
             }
             break;
         case IDC_WEATHER_TYPE:
@@ -555,10 +606,10 @@ static INT_PTR CALLBACK WeatherRegionDialogProc(HWND hdlg, UINT msg, WPARAM wp, 
             if (type_sel < 0) type_sel = 0;
             if (shape_sel < 0) shape_sel = 0;
 
-            float width = weather_region_get_float_field(hdlg, IDC_WEATHER_WIDTH);
-            float height = weather_region_get_float_field(hdlg, IDC_WEATHER_HEIGHT);
-            float depth = weather_region_get_float_field(hdlg, IDC_WEATHER_DEPTH);
-            float radius = weather_region_get_float_field(hdlg, IDC_WEATHER_RADIUS);
+            auto width = weather_region_get_dim_input(hdlg, IDC_WEATHER_WIDTH);
+            auto height = weather_region_get_dim_input(hdlg, IDC_WEATHER_HEIGHT);
+            auto depth = weather_region_get_dim_input(hdlg, IDC_WEATHER_DEPTH);
+            auto radius = weather_region_get_dim_input(hdlg, IDC_WEATHER_RADIUS);
             float density_scale = std::clamp(weather_region_get_float_field(hdlg, IDC_WEATHER_DENSITY_SCALE),
                 weather_density_scale_min, weather_density_scale_max);
             float active_distance = weather_region_get_float_field(hdlg, IDC_WEATHER_ACTIVE_DISTANCE);
@@ -597,10 +648,10 @@ static INT_PTR CALLBACK WeatherRegionDialogProc(HWND hdlg, UINT msg, WPARAM wp, 
                 }
                 w->weather_type = static_cast<WeatherRegionType>(type_sel);
                 w->shape = static_cast<WeatherRegionShape>(shape_sel);
-                w->width = width;
-                w->height = height;
-                w->depth = depth;
-                w->radius = radius;
+                w->width = width.value_or(w->width);
+                w->height = height.value_or(w->height);
+                w->depth = depth.value_or(w->depth);
+                w->radius = radius.value_or(w->radius);
                 w->density_scale = density_scale;
                 w->active_distance = active_distance;
                 w->visible_distance = visible_distance;
@@ -697,6 +748,7 @@ void ShowWeatherRegionPropertiesDialog(CDedLevel* level)
             WeatherRegionDialogProc,
             0
         );
+        g_dims_preview.active = false;
     }
 
     g_selected_weather_regions.clear();
@@ -843,15 +895,26 @@ void weather_region_render(CDedLevel* level)
         if (selected || region->always_show_range) {
             set_draw_color(r, g, b, 0xff);
 
-            switch (region->shape) {
-                case WeatherRegionShape::box: {
-                    Vector3 dims{region->width, region->height, region->depth};
+            WeatherRegionShape shape = region->shape;
+            Vector3 dims{region->width, region->height, region->depth};
+            float radius = region->radius;
+            if (g_dims_preview.active &&
+                std::find(g_selected_weather_regions.begin(), g_selected_weather_regions.end(), region) !=
+                    g_selected_weather_regions.end()) {
+                shape = g_dims_preview.shape;
+                dims.x = g_dims_preview.width.value_or(dims.x);
+                dims.y = g_dims_preview.height.value_or(dims.y);
+                dims.z = g_dims_preview.depth.value_or(dims.z);
+                radius = g_dims_preview.radius.value_or(radius);
+            }
+
+            switch (shape) {
+                case WeatherRegionShape::box:
                     draw_wireframe_box_3d(&region->pos, &region->orient, &dims, mode);
                     break;
-                }
                 case WeatherRegionShape::sphere:
                     // Rotation-invariant, so the stored orientation is ignored.
-                    draw_wireframe_sphere_3d(&region->pos, region->radius, mode);
+                    draw_wireframe_sphere_3d(&region->pos, radius, mode);
                     break;
             }
         }

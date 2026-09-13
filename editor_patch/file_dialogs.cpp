@@ -13,8 +13,6 @@ namespace
 
 // RED.exe IAT slots for COMDLG32!GetOpenFileNameA / GetSaveFileNameA. MFC's CFileDialog::DoModal
 // (0x0052CFD9) is the only stock caller, so shimming the imports upgrades every editor dialog.
-// AlpineEditor.dll imports COMDLG32 through its own table, which these slots are not, so Alpine's
-// own OPENFILENAME sites have to call the shim entry point directly.
 constexpr unsigned get_open_file_name_iat = 0x005546E4;
 constexpr unsigned get_save_file_name_iat = 0x005546E8;
 
@@ -59,9 +57,7 @@ private:
 };
 
 // RED only initialises COM lazily in its sound paths, so the shim owns the apartment for the
-// duration of the dialog unless one already exists. RPC_E_CHANGED_MODE means the thread is already
-// in a multi-threaded apartment, where driving the shell's single-threaded dialog object is not
-// allowed, so the call goes back to COMDLG32 instead.
+// duration of the dialog unless one already exists.
 class ComInit
 {
 public:
@@ -224,15 +220,13 @@ DialogOutcome collect_result(IFileDialog* dialog, OPENFILENAMEA* ofn)
     ComPtr<IShellItem> item;
     HRESULT hr = dialog->GetResult(item.put());
     if (FAILED(hr) || !item) {
-        xlog::warn("file dialog: GetResult failed ({:#x}), treating as cancel",
-                   static_cast<unsigned>(hr));
+        xlog::warn("file dialog: GetResult failed ({:#x}), treating as cancel", static_cast<unsigned>(hr));
         return DialogOutcome::cancelled;
     }
     CoTaskMemString wide_path;
     hr = item->GetDisplayName(SIGDN_FILESYSPATH, wide_path.put());
     if (FAILED(hr) || !wide_path.get()) {
-        xlog::warn("file dialog: the chosen item has no file system path ({:#x}), treating as "
-                   "cancel", static_cast<unsigned>(hr));
+        xlog::warn("file dialog: the chosen item has no file system path ({:#x}), treating as cancel", static_cast<unsigned>(hr));
         return DialogOutcome::cancelled;
     }
     const std::string path = narrow(wide_path.get());

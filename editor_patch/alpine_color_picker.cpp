@@ -15,8 +15,7 @@ constexpr int palette_slot_count = 16;
 constexpr int preset_columns = 16;
 constexpr int preset_rows = 3;
 
-// The 48 basic colours of the stock ChooseColor dialog, read out of comdlg32.dll's own table
-// (8 per hue band, 6 bands, laid out here two bands per row).
+// The 48 basic colours of the stock ChooseColor dialog.
 const COLORREF preset_colors[preset_columns * preset_rows] = {
     RGB(0xFF, 0x80, 0x80), RGB(0xFF, 0xFF, 0x80), RGB(0x80, 0xFF, 0x80), RGB(0x00, 0xFF, 0x80),
     RGB(0x80, 0xFF, 0xFF), RGB(0x00, 0x80, 0xFF), RGB(0xFF, 0x80, 0xC0), RGB(0xFF, 0x80, 0xFF),

@@ -20,8 +20,6 @@ void DestroyDedMesh(DedMesh* mesh);
 
 // VMesh loading
 struct EditorVMesh;
-// Loads a mesh by name through the editor's VFS; null when the extension is not a mesh type or
-// the file is missing. The caller owns the result and must vmesh_free it.
 EditorVMesh* mesh_load_vmesh_file(const char* filename);
 void mesh_load_vmesh(DedMesh* mesh);
 

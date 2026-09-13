@@ -233,9 +233,6 @@ struct EditorVifMesh
     int tex_handles[7];
     int num_texture_handles;
     int flags;
-    // The LOD's own vertex count, which is also the length of every chunk's orig_map:
-    // 0x0050D640 writes both from the same v3d LOD header field and sizes the map at
-    // num_original_vecs * 2 bytes.
     int num_original_vecs;
     int unk_field_from_v3d_file;
 };
@@ -336,8 +333,7 @@ static_assert(offsetof(EditorCharacter, action_is_state) == 0x120C);
 static_assert(offsetof(EditorCharacter, num_character_meshes) == 0x19BC);
 static_assert(offsetof(EditorCharacter, character_meshes) == 0x19C0);
 
-// Animation skeletons are pooled by name with the extension stripped; 0x004FFF90 matches case
-// insensitively and claims a free slot when nothing matches, so an empty name marks one free.
+// Animation skeletons are pooled by name with the extension stripped.
 struct EditorAnimSkeleton
 {
     char name[0x40];
@@ -348,23 +344,17 @@ constexpr unsigned editor_max_anim_skeletons = 800;
 static auto& editor_anim_skeletons =
     addr_as_ref<EditorAnimSkeleton[editor_max_anim_skeletons]>(0x01912278);
 
-// .v3c instance (0x1D5C bytes, allocated at 0x004BE46E); only the action hold state is mirrored.
+// .v3c instance; only the action hold state is mirrored.
 struct EditorCharacterInstance
 {
     uint8_t pad_0000[0x1D4C];
-    // Raised by 0x004DB950 when the action named by the hold flag reaches its end, which also
-    // makes that function early-return until ci_play_action (0x004DC090) clears it again.
     uint8_t action_held;
     uint8_t pad_1D4D[0x1D5C - 0x1D4D];
 };
 static_assert(sizeof(EditorCharacterInstance) == 0x1D5C);
 static_assert(offsetof(EditorCharacterInstance, action_held) == 0x1D4C);
 
-// Base characters live in a fixed table of 64 entries. character_load_or_create reuses an entry
-// whose name matches and otherwise takes a free one; with all 64 taken it raises the fatal "No more
-// base character room" error at 0x004C2D39, which ends the process. Nothing releases a slot while
-// the editor runs: the bulk unload 0x004C2C40 does clear them, but it is an atexit handler
-// (registered at 0x0048268E), it skips entries with flags & 8, and character_free has no callers.
+// Base characters live in a fixed table of 64 entries.
 constexpr unsigned editor_max_base_characters = 64;
 constexpr int editor_character_in_use = 0x1;
 static auto& editor_base_characters =
@@ -423,14 +413,10 @@ static auto& gr_bitmap_scaled = addr_as_ref<char(int bm_handle, int dst_x, int d
 // Draw mode the stock bitmap preview passes to gr_bitmap_scaled.
 static auto& gr_bitmap_preview_mode = addr_as_ref<uint32_t>(0x0147D6A0);
 
-// Camera setup, as the viewport painter (0x0047DAE0) calls it: orientation rows are
-// right/up/forward, and the last argument selects the perspective projection.
+// Camera setup: orientation rows are right/up/forward, last argument perspective projection.
 static auto& gr_setup_3d = addr_as_ref<void __cdecl(const Matrix3* orient, const Vector3* pos,
                                                     float h_fov, bool zbuffer, bool perspective)>(0x004C5980);
 
-// The perspective frustum 0x004ED5A0 builds puts its near plane through the camera position
-// itself, so this far distance is the only clip range the caller can steer; <= 1.0 disables it
-// and stores 0, which makes the stored value an exact restore argument.
 static auto& gr_set_far_clip = addr_as_ref<void __cdecl(float dist)>(0x004C5B30);
 static auto& gr_far_clip_dist = addr_as_ref<float>(0x0158F3F8);
 
@@ -490,9 +476,7 @@ enum EditorRenderFlag : uint32_t
 {
     ERF_TEXTURED            = 0x2,
     ERF_SELECTION_HIGHLIGHT = 0x20,
-    // Without this the renderer overwrites ambient_color with the scene lighting sampled at the
-    // draw position (0x00507890); with it the two fixed key lights 0x00505920 builds from
-    // ambient_color are the whole result.
+    // If not set, renderer overwrites ambient_color with scene lighting sampled at draw position.
     ERF_CUSTOM_AMBIENT      = 0x80,
 };
 
@@ -692,8 +676,7 @@ static_assert(sizeof(EditorVfsFile) == 0xC);
 static auto& vfs_file_buckets = addr_as_ref<EditorVfsFile*[0x8000]>(0x01622004);
 
 // Builds the path a search path slot resolves a name to: the root directory 0x0158CA10, which
-// always carries its own trailing separator, then the slot's path, a separator and the name. A
-// null name yields the directory itself; stock callers hand it a 1024 byte buffer.
+// always carries its own trailing separator, then the slot's path, a separator and the name.
 static auto& file_make_path =
     addr_as_ref<char* __cdecl(int path_index, const char* name, char* out)>(0x004C33D0);
 
