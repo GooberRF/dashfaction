@@ -41,20 +41,9 @@ rf::String get_action_bind_name(int action)
 {
     // Prefer gamepad button name when a controller is active
     if (gamepad_is_last_input_gamepad()) {
-        int btn_primary = -1, btn_secondary = -1;
-        gamepad_get_buttons_for_action(action, &btn_primary, &btn_secondary);
-        if (btn_primary >= 0 || btn_secondary >= 0) {
-            if (btn_primary >= 0 && btn_secondary >= 0) {
-                // Both primary and secondary assigned — combine as "Primary / Secondary".
-                char combined[128];
-                std::snprintf(combined, sizeof(combined), "%s / %s",
-                    gamepad_get_scan_code_name(CTRL_GAMEPAD_SCAN_BASE + btn_primary),
-                    gamepad_get_scan_code_name(CTRL_GAMEPAD_SCAN_BASE + btn_secondary));
-                return rf::String(combined);
-            }
-            int btn = (btn_primary >= 0) ? btn_primary : btn_secondary;
+        int btn = gamepad_get_button_for_action(action);
+        if (btn >= 0)
             return gamepad_get_scan_code_name(CTRL_GAMEPAD_SCAN_BASE + btn);
-        }
         int trig = gamepad_get_trigger_for_action(action);
         if (trig == 0) return gamepad_get_scan_code_name(CTRL_GAMEPAD_LEFT_TRIGGER);
         if (trig == 1) return gamepad_get_scan_code_name(CTRL_GAMEPAD_RIGHT_TRIGGER);
@@ -195,16 +184,8 @@ CodeInjection key_name_in_options_patch{
         int key = regs.edx;
         // Gamepad scan codes installed by the CONTROLLER binding view.
         if (key >= CTRL_GAMEPAD_SCAN_BASE && key <= CTRL_GAMEPAD_RIGHT_TRIGGER) {
-            // Gameplay action: may carry a combined "Primary / Secondary" name.
-            int alt_sc = gamepad_get_alt_sc_for_primary_sc(key);
-            if (alt_sc >= 0) {
-                std::snprintf(buf, std::size(buf), "%s / %s",
-                    gamepad_get_scan_code_name(key),
-                    gamepad_get_scan_code_name(alt_sc));
-            } else {
-                std::strncpy(buf, gamepad_get_scan_code_name(key), std::size(buf) - 1);
-                buf[std::size(buf) - 1] = '\0';
-            }
+            std::strncpy(buf, gamepad_get_scan_code_name(key), std::size(buf) - 1);
+            buf[std::size(buf) - 1] = '\0';
         } else if (key >= CTRL_GAMEPAD_MENU_BASE && key < CTRL_GAMEPAD_MENU_BASE + gamepad_get_button_count()) {
             // Menu-only action: separate namespace, never carries a secondary binding.
             std::strncpy(buf, gamepad_get_scan_code_name(key), std::size(buf) - 1);

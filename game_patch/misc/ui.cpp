@@ -2744,8 +2744,7 @@ static void install_ctrl_gamepad_codes()
         g_saved_sc1[i]           = cc.bindings[i].scan_codes[1];
         g_saved_mouse_btn_ids[i] = cc.bindings[i].mouse_btn_id;
         bool menu_only = gamepad_is_menu_only_action(i);
-        int btn = -1, btn_alt = -1;
-        gamepad_get_buttons_for_action(i, &btn, &btn_alt);
+        int btn = gamepad_get_button_for_action(i);
         int trig = gamepad_get_trigger_for_action(i);
         int16_t code = 0; // unbound
         if (btn >= 0)
@@ -2754,15 +2753,13 @@ static void install_ctrl_gamepad_codes()
         else if (trig == 0) code = static_cast<int16_t>(CTRL_GAMEPAD_LEFT_TRIGGER);
         else if (trig == 1) code = static_cast<int16_t>(CTRL_GAMEPAD_RIGHT_TRIGGER);
         cc.bindings[i].scan_codes[0] = code;
-        // Menu-only actions never have secondary bindings.
-        cc.bindings[i].scan_codes[1] = (!menu_only && btn_alt >= 0)
-            ? static_cast<int16_t>(CTRL_GAMEPAD_SCAN_BASE + btn_alt) : int16_t{0};
+        cc.bindings[i].scan_codes[1] = 0;
         cc.bindings[i].mouse_btn_id  = -1; // no mouse binding in gamepad view
     }
     g_ctrl_codes_installed = true;
 }
 
-// Rewrite scan_codes[0] and scan_codes[1] from the current g_button_map/g_trigger_action state.
+// Rewrite scan_codes[0] from the current g_button_map/g_trigger_action state.
 // Called after a bind completes so the list immediately reflects the new assignment.
 static void refresh_ctrl_gamepad_codes()
 {
@@ -2771,8 +2768,7 @@ static void refresh_ctrl_gamepad_codes()
     int n = std::min(cc.num_bindings, static_cast<int>(std::size(g_saved_scan_codes)));
     for (int i = 0; i < n; ++i) {
         bool menu_only = gamepad_is_menu_only_action(i);
-        int btn = -1, btn_alt = -1;
-        gamepad_get_buttons_for_action(i, &btn, &btn_alt);
+        int btn = gamepad_get_button_for_action(i);
         int trig = gamepad_get_trigger_for_action(i);
         int16_t code = 0;
         if (btn >= 0)
@@ -2781,8 +2777,7 @@ static void refresh_ctrl_gamepad_codes()
         else if (trig == 0) code = static_cast<int16_t>(CTRL_GAMEPAD_LEFT_TRIGGER);
         else if (trig == 1) code = static_cast<int16_t>(CTRL_GAMEPAD_RIGHT_TRIGGER);
         cc.bindings[i].scan_codes[0] = code;
-        cc.bindings[i].scan_codes[1] = (!menu_only && btn_alt >= 0)
-            ? static_cast<int16_t>(CTRL_GAMEPAD_SCAN_BASE + btn_alt) : int16_t{0};
+        cc.bindings[i].scan_codes[1] = 0;
     }
 }
 

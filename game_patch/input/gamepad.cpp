@@ -47,7 +47,6 @@ static float g_gamepad_scope_applied_dynamic_sensitivity_value = 1.0f;
 static float g_gamepad_scope_gyro_applied_dynamic_sensitivity_value = 1.0f;
 
 static int g_button_map[SDL_GAMEPAD_BUTTON_COUNT];
-static int g_button_map_alt[SDL_GAMEPAD_BUTTON_COUNT];
 static int g_trigger_action[2] = {rf::CC_ACTION_CROUCH, rf::CC_ACTION_SECONDARY_ATTACK}; // [0] = LT, [1] = RT
 
 // Menu-only maps for context-sensitive AF actions (spectate, vote, menus) that share buttons with gameplay.
@@ -777,7 +776,7 @@ static bool is_action_held_by_button(int action_idx)
     for (auto* gp : g_gamepads) {
         if (!gp) continue;
         for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
-            if ((g_button_map[b] == action_idx || g_button_map_alt[b] == action_idx)
+            if (g_button_map[b] == action_idx
                 && SDL_GetGamepadButton(gp, static_cast<SDL_GamepadButton>(b)))
                 return true;
     }
@@ -865,10 +864,8 @@ static void update_stick_movement()
 static void release_all_gamepad_inputs()
 {
     release_movement_keys();
-    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
+    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
         inject_action_key(g_button_map[b], false);
-        inject_action_key(g_button_map_alt[b], false);
-    }
     inject_action_key(g_trigger_action[0], false);
     inject_action_key(g_trigger_action[1], false);
     menu_nav_release_click();
@@ -971,11 +968,6 @@ static void handle_gamepad_button_down(const SDL_GamepadButtonEvent& ev)
             inject_action_key(mapped, true);
             g_action_curr[mapped] = true;
         }
-        int alt_mapped = g_button_map_alt[ev.button];
-        if (alt_mapped >= 0) {
-            inject_action_key(alt_mapped, true);
-            g_action_curr[alt_mapped] = true;
-        }
         int menu_mapped = g_menu_button_map[ev.button];
         if (menu_mapped >= 0)
             g_action_curr[menu_mapped] = true;
@@ -996,11 +988,6 @@ static void handle_gamepad_button_up(const SDL_GamepadButtonEvent& ev)
         if (mapped >= 0) {
             force_release_action_key(mapped);
             g_action_curr[mapped] = false;
-        }
-        int alt_mapped = g_button_map_alt[ev.button];
-        if (alt_mapped >= 0) {
-            force_release_action_key(alt_mapped);
-            g_action_curr[alt_mapped] = false;
         }
         int menu_mapped = g_menu_button_map[ev.button];
         if (menu_mapped >= 0)
@@ -2086,33 +2073,6 @@ ConsoleCommand2 joy_reset_cmd{
     "Close and reopen the SDL gamepad (re-enables sensors, resets gyro state)",
 };
 
-// Returns the secondary (alt) scan code for the action bound to the given primary
-// scan code, or -1 if there is no secondary. Used by the binding list renderer.
-int gamepad_get_alt_sc_for_primary_sc(int primary_sc)
-{
-    // Menu-only actions use CTRL_GAMEPAD_MENU_BASE codes and never carry a secondary binding.
-    if (primary_sc >= CTRL_GAMEPAD_MENU_BASE && primary_sc < CTRL_GAMEPAD_MENU_BASE + SDL_GAMEPAD_BUTTON_COUNT)
-        return -1;
-
-    // Resolve which gameplay action index owns this primary scan code.
-    int action = -1;
-    int offset = primary_sc - CTRL_GAMEPAD_SCAN_BASE;
-    if (offset >= 0 && offset < SDL_GAMEPAD_BUTTON_COUNT)
-        action = g_button_map[offset];
-    else if (primary_sc == static_cast<int>(CTRL_GAMEPAD_LEFT_TRIGGER))
-        action = g_trigger_action[0];
-    else if (primary_sc == static_cast<int>(CTRL_GAMEPAD_RIGHT_TRIGGER))
-        action = g_trigger_action[1];
-
-    if (action < 0) return -1;
-
-    // Look for an extended-button secondary bound to the same action.
-    for (int b = SDL_GAMEPAD_BUTTON_MISC1; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
-        if (g_button_map_alt[b] == action)
-            return CTRL_GAMEPAD_SCAN_BASE + b;
-    return -1;
-}
-
 bool gamepad_is_motionsensors_supported()
 {
     return g_motion_sensors_supported;
@@ -2148,21 +2108,6 @@ int gamepad_get_button_for_action(int action_idx)
     return -1;
 }
 
-// Returns the primary and secondary button indices for a gameplay action.
-// The secondary is the extended-button (paddle/misc/touchpad) secondary binding, if any.
-// Either output is set to -1 if not present.
-void gamepad_get_buttons_for_action(int action_idx, int* btn_primary, int* btn_secondary)
-{
-    *btn_primary   = -1;
-    *btn_secondary = -1;
-    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
-        if (*btn_primary < 0 && (g_button_map[b] == action_idx || g_menu_button_map[b] == action_idx))
-            *btn_primary = b;
-        if (*btn_secondary < 0 && g_button_map_alt[b] == action_idx)
-            *btn_secondary = b;
-    }
-}
-
 int gamepad_get_trigger_for_action(int action_idx)
 {
     if (g_trigger_action[0] == action_idx || g_menu_trigger_action[0] == action_idx) return 0;
@@ -2195,8 +2140,7 @@ const char* gamepad_get_menu_cancel_button_name()
 
 void gamepad_clear_all_bindings()
 {
-    memset(g_button_map,     -1, sizeof(g_button_map));
-    memset(g_button_map_alt, -1, sizeof(g_button_map_alt));
+    memset(g_button_map, -1, sizeof(g_button_map));
     g_trigger_action[0] = g_trigger_action[1] = -1;
     memset(g_menu_button_map, -1, sizeof(g_menu_button_map));
     g_menu_trigger_action[0] = g_menu_trigger_action[1] = -1;
@@ -2208,42 +2152,32 @@ void gamepad_sync_bindings_from_scan_codes()
     gamepad_clear_all_bindings();
     auto& cc = rf::local_player->settings.controls;
     for (int i = 0; i < cc.num_bindings; ++i) {
-        // Primary slot (scan_codes[0])
-        {
-            int16_t sc = cc.bindings[i].scan_codes[0];
-            bool menu_only = is_menu_only_action(i);
+        int16_t sc = cc.bindings[i].scan_codes[0];
+        bool menu_only = is_menu_only_action(i);
 
-            int menu_offset = static_cast<int>(sc) - CTRL_GAMEPAD_MENU_BASE;
-            if (menu_only && menu_offset >= 0 && menu_offset < SDL_GAMEPAD_BUTTON_COUNT) {
-                if (menu_offset != SDL_GAMEPAD_BUTTON_START)
-                    g_menu_button_map[menu_offset] = i;
-            }
-            else {
-                int offset = static_cast<int>(sc) - CTRL_GAMEPAD_SCAN_BASE;
-                if (offset >= 0 && offset < SDL_GAMEPAD_BUTTON_COUNT) {
-                    if (offset != SDL_GAMEPAD_BUTTON_START && offset != SDL_GAMEPAD_BUTTON_GUIDE) { // START and GUIDE are reserved, never rebindable
-                        if (menu_only)
-                            g_menu_button_map[offset] = i;
-                        else
-                            g_button_map[offset] = i;
-                    }
-                }
-                else if (sc == static_cast<int16_t>(CTRL_GAMEPAD_LEFT_TRIGGER)) {
-                    if (menu_only) g_menu_trigger_action[0] = i;
-                    else           g_trigger_action[0] = i;
-                }
-                else if (sc == static_cast<int16_t>(CTRL_GAMEPAD_RIGHT_TRIGGER)) {
-                    if (menu_only) g_menu_trigger_action[1] = i;
-                    else           g_trigger_action[1] = i;
-                }
-            }
+        int menu_offset = static_cast<int>(sc) - CTRL_GAMEPAD_MENU_BASE;
+        if (menu_only && menu_offset >= 0 && menu_offset < SDL_GAMEPAD_BUTTON_COUNT) {
+            if (menu_offset != SDL_GAMEPAD_BUTTON_START)
+                g_menu_button_map[menu_offset] = i;
         }
-        // Secondary slot (scan_codes[1]) — extended-button secondary for gameplay actions only.
-        if (!is_menu_only_action(i)) {
-            int16_t sc1 = cc.bindings[i].scan_codes[1];
-            int offset1 = static_cast<int>(sc1) - CTRL_GAMEPAD_SCAN_BASE;
-            if (offset1 >= SDL_GAMEPAD_BUTTON_MISC1 && offset1 < SDL_GAMEPAD_BUTTON_COUNT)
-                g_button_map_alt[offset1] = i;
+        else {
+            int offset = static_cast<int>(sc) - CTRL_GAMEPAD_SCAN_BASE;
+            if (offset >= 0 && offset < SDL_GAMEPAD_BUTTON_COUNT) {
+                if (offset != SDL_GAMEPAD_BUTTON_START && offset != SDL_GAMEPAD_BUTTON_GUIDE) { // START and GUIDE are reserved, never rebindable
+                    if (menu_only)
+                        g_menu_button_map[offset] = i;
+                    else
+                        g_button_map[offset] = i;
+                }
+            }
+            else if (sc == static_cast<int16_t>(CTRL_GAMEPAD_LEFT_TRIGGER)) {
+                if (menu_only) g_menu_trigger_action[0] = i;
+                else           g_trigger_action[0] = i;
+            }
+            else if (sc == static_cast<int16_t>(CTRL_GAMEPAD_RIGHT_TRIGGER)) {
+                if (menu_only) g_menu_trigger_action[1] = i;
+                else           g_trigger_action[1] = i;
+            }
         }
     }
 }
@@ -2262,81 +2196,21 @@ void gamepad_apply_rebind(int16_t new_code)
         if (new_code != -1) {
             bool target_is_menu_only = is_menu_only_action(i);
             int new_offset = static_cast<int>(new_code) - CTRL_GAMEPAD_SCAN_BASE;
-            bool new_is_extended = (new_offset >= SDL_GAMEPAD_BUTTON_MISC1 && new_offset < SDL_GAMEPAD_BUTTON_COUNT);
 
             // Menu-only actions use the CTRL_GAMEPAD_MENU_BASE scan-code namespace so they are
             // never confused with gameplay actions that share the same physical button.
             if (target_is_menu_only && new_offset >= 0 && new_offset < SDL_GAMEPAD_BUTTON_COUNT)
                 new_code = static_cast<int16_t>(CTRL_GAMEPAD_MENU_BASE + new_offset);
 
-            // For gameplay actions: if binding an extended button (paddle/misc/touchpad) and this
-            // action already has a standard primary in g_button_map OR a trigger, store as
-            // secondary instead of replacing the primary.
-            if (new_is_extended && !target_is_menu_only) {
-                // Check standard buttons first.
-                int existing_primary = -1;
-                for (int b = 0; b < SDL_GAMEPAD_BUTTON_MISC1; ++b)
-                    if (g_button_map[b] == i) { existing_primary = b; break; }
-
-                // Also check triggers — they can be the primary for this action.
-                int existing_trigger = -1; // 0 = LT, 1 = RT
-                if (g_trigger_action[0] == i)       existing_trigger = 0;
-                else if (g_trigger_action[1] == i)  existing_trigger = 1;
-
-                if (existing_primary >= 0 || existing_trigger >= 0) {
-                    // Conflict-clear this extended button from other actions' secondary slots.
-                    for (int j = 0; j < cc.num_bindings; ++j)
-                        if (j != i && cc.bindings[j].scan_codes[1] == new_code)
-                            cc.bindings[j].scan_codes[1] = -1;
-                    // Determine the scan code that represents the existing primary.
-                    int16_t primary_sc;
-                    if (existing_primary >= 0)
-                        primary_sc = static_cast<int16_t>(CTRL_GAMEPAD_SCAN_BASE + existing_primary);
-                    else
-                        primary_sc = (existing_trigger == 0)
-                            ? static_cast<int16_t>(CTRL_GAMEPAD_LEFT_TRIGGER)
-                            : static_cast<int16_t>(CTRL_GAMEPAD_RIGHT_TRIGGER);
-                    // Restore sc[0] to the known primary and set sc[1] as secondary.
-                    cc.bindings[i].scan_codes[0] = primary_sc;
-                    cc.bindings[i].scan_codes[1] = new_code;
-                    break;
-                }
-            }
-
-            // Standard primary rebind (or extended button with no existing standard primary).
+            // Clear this button from any other action in the same binding context.
             for (int j = 0; j < cc.num_bindings; ++j) {
-                if (j == i) continue;
-                // Clear from primary if the same binding context.
-                if (cc.bindings[j].scan_codes[0] == new_code
-                    && is_menu_only_action(j) == target_is_menu_only) {
+                if (j != i && cc.bindings[j].scan_codes[0] == new_code
+                    && is_menu_only_action(j) == target_is_menu_only)
                     cc.bindings[j].scan_codes[0] = -1;
-                    // If j still has an extended secondary, promote it to primary now — otherwise
-                    // it would become orphaned (secondary with no primary → shows as empty in UI).
-                    int16_t sc1_j = cc.bindings[j].scan_codes[1];
-                    int off1_j    = static_cast<int>(sc1_j) - CTRL_GAMEPAD_SCAN_BASE;
-                    if (sc1_j != -1
-                        && off1_j >= SDL_GAMEPAD_BUTTON_MISC1 && off1_j < SDL_GAMEPAD_BUTTON_COUNT
-                        && !is_menu_only_action(j)) {
-                        cc.bindings[j].scan_codes[0] = sc1_j;
-                        cc.bindings[j].scan_codes[1] = -1;
-                    }
-                }
-                // Always clear from secondary slots to avoid a button appearing in two places.
-                if (cc.bindings[j].scan_codes[1] == new_code)
-                    cc.bindings[j].scan_codes[1] = -1;
             }
-            // If the target action itself already holds new_code as its secondary (e.g. the user
-            // presses the same extended button again after its primary was moved away), clear the
-            // secondary to prevent "Mic / Mic" after sc[0] is written below.
-            if (cc.bindings[i].scan_codes[1] == new_code)
-                cc.bindings[i].scan_codes[1] = -1;
         }
 
         cc.bindings[i].scan_codes[0] = new_code;
-        // When clearing the primary binding, also clear any secondary.
-        if (new_code == -1)
-            cc.bindings[i].scan_codes[1] = -1;
-
         break;
     }
 }
@@ -2354,20 +2228,6 @@ void gamepad_set_button_binding(int button_idx, int action_idx)
         g_menu_button_map[button_idx] = action_idx;
     else
         g_button_map[button_idx] = action_idx;
-}
-
-int gamepad_get_button_alt_binding(int button_idx)
-{
-    if (button_idx < 0 || button_idx >= SDL_GAMEPAD_BUTTON_COUNT) return -1;
-    return g_button_map_alt[button_idx];
-}
-
-void gamepad_set_button_alt_binding(int button_idx, int action_idx)
-{
-    if (button_idx < 0 || button_idx >= SDL_GAMEPAD_BUTTON_COUNT) return;
-    // Secondary/alt bindings are only for gameplay (non-menu) actions.
-    if (!is_menu_only_action(action_idx))
-        g_button_map_alt[button_idx] = action_idx;
 }
 
 int gamepad_get_trigger_action(int trigger_idx)
@@ -2388,7 +2248,6 @@ void gamepad_set_trigger_action(int trigger_idx, int action_idx)
 void gamepad_reset_to_defaults()
 {
     memset(g_button_map, -1, sizeof(g_button_map));
-    memset(g_button_map_alt, -1, sizeof(g_button_map_alt));
     memset(g_menu_button_map, -1, sizeof(g_menu_button_map));
     g_trigger_action[0] = g_trigger_action[1] = -1;
     g_menu_trigger_action[0] = g_menu_trigger_action[1] = -1;
