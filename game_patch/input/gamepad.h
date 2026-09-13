@@ -26,8 +26,6 @@ void flush_freelook_gamepad_deltas();
 bool gamepad_is_motionsensors_supported();
 bool gamepad_is_trigger_rumble_supported();
 bool gamepad_is_touchpad_touched();
-bool gamepad_is_last_input_gamepad();
-void gamepad_set_last_input_keyboard();
 
 // Controller binding UI
 int         gamepad_get_button_for_action(int action_idx);  // -1 if unbound

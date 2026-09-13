@@ -15,6 +15,7 @@
 #include "../hud/hud.h"
 #include "../hud/hud_internal.h"
 #include "../input/gamepad.h"
+#include "../input/input.h"
 
 namespace
 {
@@ -223,7 +224,7 @@ void spray_picker_render()
             hud_rect_border(dx - 2, dy - 2, lo.thumb + 4, lo.thumb + 4,
                 std::max(2, static_cast<int>(3 * lo.scale)));
         }
-        else if (i == g_focused_cell && gamepad_is_last_input_gamepad()) {
+        else if (i == g_focused_cell && input_last_gamepad_active()) {
             rf::gr::set_color(255, 220, 60, 255);
             hud_rect_border(dx - 2, dy - 2, lo.thumb + 4, lo.thumb + 4,
                 std::max(2, static_cast<int>(3 * lo.scale)));
@@ -275,7 +276,7 @@ void spray_picker_render()
     hud_rect_border(lo.cancel_x, lo.cancel_y, lo.cancel_w, lo.cancel_h, 1);
     rf::gr::set_color(255, 255, 255, 255);
     char cancel_label[64];
-    if (gamepad_is_last_input_gamepad())
+    if (input_last_gamepad_active())
         std::snprintf(cancel_label, sizeof(cancel_label), "Cancel (%s)", gamepad_get_menu_cancel_button_name());
     else
         std::strncpy(cancel_label, "Cancel (Esc)", sizeof(cancel_label) - 1);

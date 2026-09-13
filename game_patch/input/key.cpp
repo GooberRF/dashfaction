@@ -40,7 +40,7 @@ static int starting_alpine_control_index = -1;
 rf::String get_action_bind_name(int action)
 {
     // Prefer gamepad button name when a controller is active
-    if (gamepad_is_last_input_gamepad()) {
+    if (input_last_gamepad_active()) {
         int btn = gamepad_get_button_for_action(action);
         if (btn >= 0)
             return gamepad_get_scan_code_name(CTRL_GAMEPAD_SCAN_BASE + btn);
@@ -651,11 +651,11 @@ FunHook<void(int, int, int)> key_msg_handler_hook{
             case WM_RBUTTONDOWN:
             case WM_MBUTTONDOWN:
             case WM_XBUTTONDOWN:
-                gamepad_set_last_input_keyboard();
+                input_active_keyboard_mouse();
                 break;
             case WM_KEYDOWN:
             case WM_SYSKEYDOWN:
-                gamepad_set_last_input_keyboard();
+                input_active_keyboard_mouse();
                 [[fallthrough]];
             case WM_KEYUP:
             case WM_SYSKEYUP: {
