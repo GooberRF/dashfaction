@@ -68,6 +68,9 @@ void hud_personas_apply_patches();
 void hud_personas_set_big(bool is_big);
 void hud_weapons_apply_patches();
 void hud_weapons_set_big(bool is_big);
+struct ReticleConfig;
+ReticleConfig& reticle_edit_target(); // config the ui_reticle_* / ui_color_reticle* commands modify
+std::string reticle_edit_target_label();
 void weapon_select_apply_patches();
 void weapon_select_set_big(bool is_big);
 void multi_hud_chat_apply_patches();

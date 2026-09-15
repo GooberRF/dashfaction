@@ -3,6 +3,7 @@
 #include "../misc/alpine_options.h"
 #include "../misc/alpine_settings.h"
 #include "../os/console.h"
+#include "hud_internal.h"
 
 void print_hex_color_state(
     const std::string& label,
@@ -191,10 +192,10 @@ ConsoleCommand2 reticle_color_cmd{
     [](std::optional<std::string> color_opt) {
         handle_hex_color_console_command(
             color_opt,
-            "Reticle color override",
-            g_alpine_game_config.reticle_color_override);
+            "Reticle color override (" + reticle_edit_target_label() + ")",
+            reticle_edit_target().color);
 
-        if (g_alpine_game_config.reticle_color_override) {
+        if (reticle_edit_target().color) {
             rf::console::print("Color override is {}being applied to custom reticles. Use ui_colorize_custom_reticles to change this behavior.", g_alpine_game_config.colorize_custom_reticles ? "" : "NOT ");
         }
     },
@@ -207,10 +208,10 @@ ConsoleCommand2 reticle_locked_color_cmd{
     [](std::optional<std::string> color_opt) {
         handle_hex_color_console_command(
             color_opt,
-            "Locked reticle color override",
-            g_alpine_game_config.reticle_locked_color_override);
+            "Locked reticle color override (" + reticle_edit_target_label() + ")",
+            reticle_edit_target().locked_color);
 
-        if (g_alpine_game_config.reticle_locked_color_override) {
+        if (reticle_edit_target().locked_color) {
             rf::console::print("Color override is {}being applied to custom reticles. Use ui_colorize_custom_reticles to change this behavior.", g_alpine_game_config.colorize_custom_reticles ? "" : "NOT ");
         }
     },
@@ -288,6 +289,16 @@ static void handle_required_color_command(
     rf::console::print("{} set to {} (RGBA {}, {}, {}, {})", label, format_hex_color_string(*parsed_color), r, g, b, a);
 }
 
+ConsoleCommand2 reticle_outline_color_cmd{
+    "ui_color_reticle_outline",
+    [](std::optional<std::string> color_opt) {
+        handle_required_color_command(color_opt, "Vector reticle outline color (" + reticle_edit_target_label() + ")",
+                                      reticle_edit_target().outline_color, ReticleConfig::default_outline_color);
+    },
+    "Set vector reticle outline color (clear resets to black).",
+    "ui_color_reticle_outline <RRGGBB|RRGGBBAA|clear>",
+};
+
 ConsoleCommand2 r_outlines_color_cmd{
     "r_outlines_color",
     [](std::optional<std::string> color_opt) {
@@ -361,6 +372,7 @@ void hud_colors_apply_patch()
     teammate_label_color_cmd.register_cmd();
     reticle_color_cmd.register_cmd();
     reticle_locked_color_cmd.register_cmd();
+    reticle_outline_color_cmd.register_cmd();
     reticle_color_custom_cmd.register_cmd();
     thermal_entity_color_cmd.register_cmd();
     r_outlines_color_cmd.register_cmd();

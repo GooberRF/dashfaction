@@ -805,26 +805,6 @@ bool alpine_player_settings_load(rf::Player* player)
         }
         processed_keys.insert("TeammateLabelColor");
     }
-    if (settings.count("ReticleColor")) {
-        auto color_override = parse_hex_color_string(settings["ReticleColor"]);
-        if (color_override) {
-            g_alpine_game_config.reticle_color_override = color_override;
-        }
-        else {
-            xlog::warn("Invalid reticle color override: {}", settings["ReticleColor"]);
-        }
-        processed_keys.insert("ReticleColor");
-    }
-    if (settings.count("ReticleLockedColor")) {
-        auto color_override = parse_hex_color_string(settings["ReticleLockedColor"]);
-        if (color_override) {
-            g_alpine_game_config.reticle_locked_color_override = color_override;
-        }
-        else {
-            xlog::warn("Invalid reticle color override: {}", settings["ReticleLockedColor"]);
-        }
-        processed_keys.insert("ReticleLockedColor");
-    }
     if (settings.count("ReticleScale")) {
         const float scale = std::stof(settings["ReticleScale"]);
         if (scale == 1.0f) {
@@ -834,6 +814,51 @@ bool alpine_player_settings_load(rf::Player* player)
             g_alpine_game_config.set_reticle_scale(scale);
         }
         processed_keys.insert("ReticleScale");
+    }
+    for (const auto& f : reticle_int_fields) {
+        if (settings.count(f.ini_key)) {
+            reticle_set_int(g_alpine_game_config.reticle, f, std::atoi(settings[f.ini_key].c_str()));
+            processed_keys.insert(f.ini_key);
+        }
+    }
+    if (settings.count("ReticleColor")) {
+        auto color = parse_hex_color_string(settings["ReticleColor"]);
+        if (color) {
+            g_alpine_game_config.reticle.color = color;
+        }
+        else {
+            xlog::warn("Invalid reticle color override: {}", settings["ReticleColor"]);
+        }
+        processed_keys.insert("ReticleColor");
+    }
+    if (settings.count("ReticleLockedColor")) {
+        auto color = parse_hex_color_string(settings["ReticleLockedColor"]);
+        if (color) {
+            g_alpine_game_config.reticle.locked_color = color;
+        }
+        else {
+            xlog::warn("Invalid locked reticle color override: {}", settings["ReticleLockedColor"]);
+        }
+        processed_keys.insert("ReticleLockedColor");
+    }
+    if (settings.count("ReticleOutlineColor")) {
+        auto color = parse_hex_color_string(settings["ReticleOutlineColor"]);
+        if (color) {
+            g_alpine_game_config.reticle.outline_color = *color;
+        }
+        else {
+            xlog::warn("Invalid reticle outline color: {}", settings["ReticleOutlineColor"]);
+        }
+        processed_keys.insert("ReticleOutlineColor");
+    }
+    // per-weapon reticle overrides: WeaponReticle_<weapon class name>=style=3;dot_size=3;...
+    for (const auto& [key, value] : settings) {
+        if (key.rfind("WeaponReticle_", 0) == 0 && key.size() > 14) {
+            ReticleConfig cfg = g_alpine_game_config.reticle;
+            reticle_config_from_string(cfg, value);
+            g_alpine_game_config.weapon_reticles[key.substr(14)] = cfg;
+            processed_keys.insert(key);
+        }
     }
     if (settings.count("DamageNotifyTextScale")) {
         const float scale = std::stof(settings["DamageNotifyTextScale"]);
@@ -1549,17 +1574,24 @@ void alpine_player_settings_save(rf::Player* player)
     if (g_alpine_game_config.multi_timer_color_override) {
         file << "MultiTimerColor=" << format_hex_color_string(*g_alpine_game_config.multi_timer_color_override) << "\n";
     }
-    if (g_alpine_game_config.reticle_color_override) {
-        file << "ReticleColor=" << format_hex_color_string(*g_alpine_game_config.reticle_color_override) << "\n";
-    }
-    if (g_alpine_game_config.reticle_locked_color_override) {
-        file << "ReticleLockedColor=" << format_hex_color_string(*g_alpine_game_config.reticle_locked_color_override) << "\n";
-    }
     if (g_alpine_game_config.teammate_label_color_override) {
         file << "TeammateLabelColor=" << format_hex_color_string(*g_alpine_game_config.teammate_label_color_override) << "\n";
     }
     if (g_alpine_game_config.reticle_scale) {
         file << "ReticleScale=" << *g_alpine_game_config.reticle_scale << "\n";
+    }
+    for (const auto& f : reticle_int_fields) {
+        file << f.ini_key << "=" << g_alpine_game_config.reticle.*f.member << "\n";
+    }
+    if (g_alpine_game_config.reticle.color) {
+        file << "ReticleColor=" << format_hex_color_string(*g_alpine_game_config.reticle.color) << "\n";
+    }
+    if (g_alpine_game_config.reticle.locked_color) {
+        file << "ReticleLockedColor=" << format_hex_color_string(*g_alpine_game_config.reticle.locked_color) << "\n";
+    }
+    file << "ReticleOutlineColor=" << format_hex_color_string(g_alpine_game_config.reticle.outline_color) << "\n";
+    for (const auto& [name, cfg] : g_alpine_game_config.weapon_reticles) {
+        file << "WeaponReticle_" << name << "=" << reticle_config_to_string(cfg) << "\n";
     }
     if (g_alpine_game_config.world_hud_damage_text_scale) {
         file << "DamageNotifyTextScale=" << *g_alpine_game_config.world_hud_damage_text_scale << "\n";
@@ -2010,4 +2042,51 @@ void alpine_settings_apply_patch()
 
     // Init cmd line
     get_afs_cmd_line_param();
+}
+std::string reticle_config_to_string(const ReticleConfig& cfg)
+{
+    std::string s;
+    for (const auto& f : reticle_int_fields) {
+        s += std::format("{}={};", f.cmd, cfg.*f.member);
+    }
+    s += "outline_color=" + format_hex_color_string(cfg.outline_color);
+    if (cfg.color) {
+        s += ";color=" + format_hex_color_string(*cfg.color);
+    }
+    if (cfg.locked_color) {
+        s += ";locked_color=" + format_hex_color_string(*cfg.locked_color);
+    }
+    return s;
+}
+
+void reticle_config_from_string(ReticleConfig& cfg, const std::string& s)
+{
+    std::istringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, ';')) {
+        const auto eq = item.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = item.substr(0, eq);
+        const std::string val = item.substr(eq + 1);
+        if (key == "color") {
+            cfg.color = parse_hex_color_string(val);
+        }
+        else if (key == "locked_color") {
+            cfg.locked_color = parse_hex_color_string(val);
+        }
+        else if (key == "outline_color") {
+            if (auto c = parse_hex_color_string(val)) {
+                cfg.outline_color = *c;
+            }
+        }
+        else {
+            for (const auto& f : reticle_int_fields) {
+                if (key == f.cmd) {
+                    reticle_set_int(cfg, f, std::atoi(val.c_str()));
+                }
+            }
+        }
+    }
 }
