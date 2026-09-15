@@ -382,7 +382,7 @@ static bool is_gamepad_menu_navigation_state()
 static void inject_action_key(int action, bool down)
 {
     if (!rf::gameseq_in_gameplay()) return;
-    if (rf::console::console_is_visible()) return;
+    if (down && rf::console::console_is_visible()) return;
     if (!rf::local_player || action < 0 || action >= rf::local_player->settings.controls.num_bindings)
         return;
     int16_t sc = rf::local_player->settings.controls.bindings[action].scan_codes[0];
@@ -392,7 +392,6 @@ static void inject_action_key(int action, bool down)
 
 static void force_release_action_key(int action)
 {
-    if (rf::console::console_is_visible()) return;
     if (!rf::local_player || action < 0 || action >= rf::local_player->settings.controls.num_bindings)
         return;
     int16_t sc = rf::local_player->settings.controls.bindings[action].scan_codes[0];
@@ -776,13 +775,15 @@ static bool is_action_held_by_button(int action_idx)
 static void set_movement_key(rf::ControlConfigAction action, bool down)
 {
     int idx = static_cast<int>(action);
-    // A digital button binding takes priority: don't release the key while a button holds it.
-    // Only applies during gameplay — outside of it no scan codes should be injected at all.
+    // A digital button binding takes priority: don't clear the action while a button holds it.
     bool in_gameplay = rf::gameseq_in_gameplay();
     if (in_gameplay)
         down = down || is_action_held_by_button(idx);
-    if (g_action_curr[idx] == down) return;
-    if (in_gameplay && rf::local_player && !rf::console::console_is_visible()) {
+
+    // Vehicles have no analog throttle path and drive off the real key-down state, we're injecting key events.
+    if (in_gameplay && rf::local_player_entity && rf::entity_in_vehicle(rf::local_player_entity)
+        && g_action_curr[idx] != down && rf::local_player
+        && (!down || !rf::console::console_is_visible())) {
         int16_t sc = rf::local_player->settings.controls.bindings[idx].scan_codes[0];
         if (sc > 0)
             rf::key_process_event(sc, down ? 1 : 0, 0);
@@ -801,9 +802,10 @@ static void release_movement_keys()
         rf::CC_ACTION_SLIDE_LEFT,
         rf::CC_ACTION_SLIDE_RIGHT,
     };
+    bool in_vehicle = rf::local_player_entity && rf::entity_in_vehicle(rf::local_player_entity);
     for (rf::ControlConfigAction action : k_move_actions) {
         int idx = static_cast<int>(action);
-        if (g_action_curr[idx] && rf::local_player && !rf::console::console_is_visible()) {
+        if (in_vehicle && g_action_curr[idx] && rf::local_player) {
             int16_t sc = rf::local_player->settings.controls.bindings[idx].scan_codes[0];
             if (sc > 0)
                 rf::key_process_event(sc, 0, 0);
