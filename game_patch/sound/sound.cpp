@@ -11,6 +11,7 @@
 #include "../rf/entity.h"
 #include "../rf/multi.h"
 #include "../rf/os/frametime.h"
+#include "../rf/os/timestamp.h"
 #include "../multi/multi.h"
 #include "../misc/alpine_settings.h"
 #include "../main/main.h"
@@ -428,14 +429,23 @@ FunHook<void(const rf::Vector3&, const rf::Vector3&, const rf::Matrix3&)> snd_up
             return;
         }
 
-        player_fpgun_move_sounds(camera_pos, camera_vel);
-
 #ifdef DEBUG
         sound_test_do_frame();
 #endif
 
         rf::sound_listener_pos = camera_pos;
         rf::sound_listener_rvec = camera_orient.rvec;
+
+        // Perf: the DS3D listener update and per-instance volume/pan updates issue
+        // DirectSound COM calls every frame; recomputing them at uncapped framerates is
+        // inaudible waste. 100 Hz is far above audible volume/pan tracking resolution.
+        static rf::Timestamp update_timer;
+        if (update_timer.valid() && !update_timer.elapsed()) {
+            return;
+        }
+        update_timer.set(10);
+
+        player_fpgun_move_sounds(camera_pos, camera_vel);
 
         // Update DirectSound 3D listener parameters
         rf::snd_pc_change_listener(camera_pos, camera_vel, camera_orient);
